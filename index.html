@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signalvest</title>
+<style>
+  :root{
+    --bg:#0b0d10; --panel:#14171c; --border:#262b33; --text:#e8eaed; --muted:#8b93a1;
+    --buy:#2ecc71; --hold:#f1c40f; --avoid:#e74c3c; --accent:#4da3ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text)}
+  header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  header h1{font-size:18px;margin:0}
+  header .sub{color:var(--muted);font-size:12px}
+  nav{display:flex;gap:4px;padding:8px 20px;border-bottom:1px solid var(--border);overflow-x:auto}
+  nav button{background:none;border:none;color:var(--muted);padding:8px 14px;border-radius:8px;cursor:pointer;font-size:14px;white-space:nowrap}
+  nav button.active{background:var(--panel);color:var(--text)}
+  main{padding:16px 20px 60px;max-width:900px;margin:0 auto}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  label{font-size:13px;color:var(--muted);display:block;margin-bottom:4px}
+  input,select,textarea{background:#0b0d10;border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:14px}
+  button.btn{background:var(--accent);color:#031225;border:none;padding:9px 16px;border-radius:8px;font-weight:600;cursor:pointer;font-size:14px}
+  button.btn.secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:600}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
+  .pill.BUY{background:rgba(46,204,113,.15);color:var(--buy)}
+  .pill.HOLD{background:rgba(241,196,15,.15);color:var(--hold)}
+  .pill.AVOID{background:rgba(231,76,60,.15);color:var(--avoid)}
+  .muted{color:var(--muted)}
+  .warn{background:rgba(231,76,60,.12);border:1px solid rgba(231,76,60,.35);color:#ff8a80;padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}
+  .hidden{display:none}
+  .tag{cursor:pointer;color:var(--accent);font-size:12px}
+  footer{color:var(--muted);font-size:11px;text-align:center;padding:20px}
+  .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Signalvest</h1>
+    <div class="sub">Bursa Malaysia signals — advisory only, not financial advice</div>
+  </div>
+  <div class="sub" id="cashHeader"></div>
+</header>
+<nav>
+  <button data-tab="screener" class="active">Screener</button>
+  <button data-tab="portfolio">Portfolio</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+<main>
+
+  <section id="tab-screener">
+    <div class="panel">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <div style="font-weight:600">Watchlist screener</div>
+          <div class="muted" style="font-size:12px">Screens the bundled universe + anything you're holding, sized to your budget.</div>
+        </div>
+        <button class="btn" id="runScreen">Run screener</button>
+      </div>
+      <div id="screenStatus" class="muted" style="font-size:12px;margin-top:8px"></div>
+    </div>
+    <div class="panel" id="resultsPanel" style="display:none">
+      <table>
+        <thead><tr><th>Ticker</th><th>Price (RM)</th><th>Trend</th><th>RSI14</th><th>Signal</th><th>100-lot cost</th><th>Fits budget</th></tr></thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-portfolio" class="hidden">
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:8px">Log a trade</div>
+      <div class="row">
+        <div><label>Side</label><select id="tSide"><option>Buy</option><option>Sell</option></select></div>
+        <div><label>Ticker</label><input id="tTicker" placeholder="0036.KL"></div>
+        <div><label>Qty (shares)</label><input id="tQty" type="number" step="100"></div>
+        <div><label>Price (RM)</label><input id="tPrice" type="number" step="0.001"></div>
+        <div><label>Date</label><input id="tDate" type="date"></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="logTrade">Log to Sheet</button>
+        <span id="logStatus" class="muted" style="font-size:12px"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:6px">Import Moomoo trade history CSV</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">
+        Export your history from Moomoo (Account → History → Export) and drop it here.
+        Filled orders only are imported; already-logged trades are skipped automatically.
+      </div>
+      <input type="file" id="csvFile" accept=".csv">
+      <div class="row" style="margin-top:10px">
+        <button class="btn secondary" id="importCsv">Parse &amp; sync new trades</button>
+        <span id="importStatus" class="muted" style="font-size:12px"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:6px">Holdings (from your Sheet)</div>
+      <div id="holdingsBox" class="muted" style="font-size:13px">Connect your Sheet in Settings to see this.</div>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="hidden">
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:8px">Budget</div>
+      <label>Cash available to invest this cycle (RM)</label>
+      <input id="cashInput" type="number" step="0.01" style="width:160px">
+      <div class="muted" style="font-size:12px;margin-top:6px">
+        Stored only in this browser (localStorage) — never sent anywhere except your own Google Sheet, if connected.
+      </div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:8px">Always-tracked tickers</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">
+        Pin tickers you already hold so they always show a signal, regardless of budget fit.
+      </div>
+      <div class="row">
+        <input id="pinInput" placeholder="0036.KL">
+        <button class="btn secondary" id="pinAdd">Add</button>
+      </div>
+      <div id="pinList" style="margin-top:8px"></div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:8px">Google Sheet sync</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">
+        Paste the Apps Script Web App URL and shared secret from your deployment (see README). Stored only in this browser.
+      </div>
+      <label>Web App URL</label>
+      <input id="sheetUrl" style="width:100%" placeholder="https://script.google.com/macros/s/.../exec">
+      <label style="margin-top:8px">Shared secret</label>
+      <input id="sheetSecret" style="width:100%" type="password">
+      <div class="row" style="margin-top:10px">
+        <button class="btn secondary" id="saveSheet">Save</button>
+        <span id="sheetStatus" class="muted" style="font-size:12px"></span>
+      </div>
+    </div>
+  </section>
+
+</main>
+<footer>Signalvest is informational only — not financial advice. Always confirm with your own broker before acting.</footer>
+
+<script>
+"use strict";
+
+/* ---------- storage ---------- */
+const LS = {
+  cash: "sv_cash",
+  pinned: "sv_pinned",
+  sheetUrl: "sv_sheet_url",
+  sheetSecret: "sv_sheet_secret",
+  loggedIds: "sv_logged_ids"
+};
+const load = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } };
+const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+
+let state = {
+  cash: load(LS.cash, 0),
+  pinned: load(LS.pinned, []),
+  sheetUrl: load(LS.sheetUrl, ""),
+  sheetSecret: load(LS.sheetSecret, ""),
+  loggedIds: load(LS.loggedIds, [])
+};
+
+/* ---------- tabs ---------- */
+document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  document.querySelectorAll("main > section").forEach(s => s.classList.add("hidden"));
+  document.getElementById("tab-" + b.dataset.tab).classList.remove("hidden");
+}));
+
+/* ---------- defensive price fetch (Yahoo blocks browser CORS; proxy fallback chain) ---------- */
+async function fetchJSON(url) {
+  const attempts = [
+    async () => {
+      const r = await fetch("https://r.jina.ai/" + url);
+      const t = await r.text();
+      const s = t.indexOf("{"), e = t.lastIndexOf("}");
+      return JSON.parse(t.slice(s, e + 1));
+    },
+    async () => {
+      const r = await fetch("https://api.allorigins.win/get?url=" + encodeURIComponent(url));
+      const j = await r.json();
+      return JSON.parse(j.contents);
+    },
+    async () => {
+      const r = await fetch(url);
+      return await r.json();
+    }
+  ];
+  let lastErr;
+  for (const attempt of attempts) {
+    try { return await attempt(); } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error("all fetch paths failed");
+}
+
+async function fetchHistory(ticker) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=6mo&interval=1d`;
+  const data = await fetchJSON(url);
+  const result = data?.chart?.result?.[0];
+  if (!result) throw new Error("no data for " + ticker);
+  const closes = result.indicators?.quote?.[0]?.close || [];
+  const volumes = result.indicators?.quote?.[0]?.volume || [];
+  // drop trailing/leading nulls (non-trading days in range)
+  const clean = [];
+  for (let i = 0; i < closes.length; i++) {
+    if (closes[i] != null) clean.push({ close: closes[i], volume: volumes[i] || 0 });
+  }
+  return clean;
+}
+
+/* ---------- indicators ---------- */
+function sma(values, period) {
+  if (values.length < period) return null;
+  const slice = values.slice(-period);
+  return slice.reduce((a, b) => a + b, 0) / period;
+}
+
+function rsi14(closes) {
+  const period = 14;
+  if (closes.length < period + 1) return null;
+  const changes = [];
+  for (let i = 1; i < closes.length; i++) changes.push(closes[i] - closes[i - 1]);
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 0; i < period; i++) {
+    const c = changes[i];
+    if (c > 0) avgGain += c; else avgLoss += -c;
+  }
+  avgGain /= period; avgLoss /= period;
+  for (let i = period; i < changes.length; i++) {
+    const c = changes[i];
+    const gain = c > 0 ? c : 0, loss = c < 0 ? -c : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+  }
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
+
+function classify(closes) {
+  const s20 = sma(closes, 20), s50 = sma(closes, 50), r = rsi14(closes);
+  if (s20 == null || s50 == null || r == null) return null;
+  let trend = "flat";
+  if (s20 > s50) trend = "up"; else if (s20 < s50) trend = "down";
+  let signal = "HOLD";
+  if (trend === "up" && r >= 35 && r <= 68) signal = "BUY";
+  else if (trend === "up" && r > 68) signal = "HOLD";
+  else if (trend === "down" && r < 30) signal = "HOLD";
+  else if (trend === "down") signal = "AVOID";
+  else signal = "HOLD";
+  return { trend, rsi: r, signal, sma20: s20, sma50: s50 };
+}
+
+/* ---------- screener ---------- */
+async function runScreener() {
+  const btn = document.getElementById("runScreen");
+  const status = document.getElementById("screenStatus");
+  btn.disabled = true;
+  status.innerHTML = '<span class="spinner"></span> loading universe...';
+  const resultsBody = document.getElementById("resultsBody");
+  resultsBody.innerHTML = "";
+  document.getElementById("resultsPanel").style.display = "block";
+
+  let universe;
+  try {
+    universe = await (await fetch("universe.json")).json();
+  } catch (e) {
+    status.textContent = "Could not load universe.json";
+    btn.disabled = false;
+    return;
+  }
+  const pinnedSet = new Set(state.pinned.map(t => t.toUpperCase()));
+  for (const t of pinnedSet) {
+    if (!universe.find(u => u.code.toUpperCase() === t)) universe.push({ code: t, name: t });
+  }
+
+  const cash = Number(state.cash) || 0;
+  let done = 0;
+  const rows = [];
+  for (const stock of universe) {
+    status.textContent = `checking ${stock.code} (${++done}/${universe.length})...`;
+    try {
+      const hist = await fetchHistory(stock.code);
+      const closes = hist.map(h => h.close);
+      const avgVol20 = hist.slice(-20).reduce((a, h) => a + h.volume, 0) / Math.min(20, hist.length);
+      const cls = classify(closes);
+      if (!cls) continue;
+      const price = closes[closes.length - 1];
+      const lotCost = price * 100;
+      const isPinned = pinnedSet.has(stock.code.toUpperCase());
+      const liquid = avgVol20 >= 50000; // liquidity floor; adjust in universe.json curation if needed
+      const fitsBudget = lotCost <= cash;
+      if (!isPinned && !liquid) continue; // skip illiquid names unless you're already tracking them
+      if (!isPinned && !fitsBudget) continue; // pure screener: only surface what you could actually buy a lot of
+      rows.push({ ...stock, price, lotCost, fitsBudget, isPinned, ...cls });
+    } catch (e) {
+      // one bad ticker shouldn't kill the run
+      continue;
+    }
+  }
+
+  rows.sort((a, b) => (a.signal === "BUY" ? -1 : 0) - (b.signal === "BUY" ? -1 : 0));
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${r.code}${r.isPinned ? ' <span class="muted">(held)</span>' : ""}<br><span class="muted">${r.name}</span></td>
+      <td>${r.price.toFixed(3)}</td>
+      <td>${r.trend}</td>
+      <td>${r.rsi.toFixed(1)}</td>
+      <td><span class="pill ${r.signal}">${r.signal}</span></td>
+      <td>RM ${r.lotCost.toFixed(2)}</td>
+      <td>${r.fitsBudget ? "yes" : "no"}</td>`;
+    resultsBody.appendChild(tr);
+  }
+  status.textContent = `${rows.length} candidate(s) shown — screened ${universe.length}. Not financial advice.`;
+  btn.disabled = false;
+}
+document.getElementById("runScreen").addEventListener("click", runScreener);
+
+/* ---------- settings ---------- */
+function renderSettings() {
+  document.getElementById("cashInput").value = state.cash || "";
+  document.getElementById("sheetUrl").value = state.sheetUrl || "";
+  document.getElementById("sheetSecret").value = state.sheetSecret || "";
+  document.getElementById("cashHeader").textContent = state.cash ? `Budget: RM ${Number(state.cash).toFixed(2)}` : "";
+  const pinList = document.getElementById("pinList");
+  pinList.innerHTML = "";
+  state.pinned.forEach(t => {
+    const span = document.createElement("span");
+    span.className = "pill HOLD";
+    span.style.marginRight = "6px";
+    span.style.cursor = "pointer";
+    span.textContent = t + " ✕";
+    span.title = "click to remove";
+    span.addEventListener("click", () => {
+      state.pinned = state.pinned.filter(x => x !== t);
+      save(LS.pinned, state.pinned);
+      renderSettings();
+    });
+    pinList.appendChild(span);
+  });
+}
+document.getElementById("cashInput").addEventListener("change", e => {
+  state.cash = Number(e.target.value) || 0;
+  save(LS.cash, state.cash);
+  renderSettings();
+});
+document.getElementById("pinAdd").addEventListener("click", () => {
+  const v = document.getElementById("pinInput").value.trim();
+  if (!v) return;
+  if (!state.pinned.includes(v)) { state.pinned.push(v); save(LS.pinned, state.pinned); }
+  document.getElementById("pinInput").value = "";
+  renderSettings();
+});
+document.getElementById("saveSheet").addEventListener("click", () => {
+  state.sheetUrl = document.getElementById("sheetUrl").value.trim();
+  state.sheetSecret = document.getElementById("sheetSecret").value.trim();
+  save(LS.sheetUrl, state.sheetUrl);
+  save(LS.sheetSecret, state.sheetSecret);
+  document.getElementById("sheetStatus").textContent = "Saved.";
+  loadHoldings();
+});
+renderSettings();
+
+/* ---------- sheet sync ---------- */
+async function sheetGet(action) {
+  if (!state.sheetUrl) throw new Error("no sheet connected");
+  const url = `${state.sheetUrl}?secret=${encodeURIComponent(state.sheetSecret)}&action=${action}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("sheet request failed");
+  return await r.json();
+}
+async function sheetPost(payload) {
+  if (!state.sheetUrl) throw new Error("no sheet connected");
+  const r = await fetch(state.sheetUrl, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" }, // avoids a CORS preflight against Apps Script
+    body: JSON.stringify({ ...payload, secret: state.sheetSecret })
+  });
+  return await r.json();
+}
+
+async function loadHoldings() {
+  const box = document.getElementById("holdingsBox");
+  if (!state.sheetUrl) { box.textContent = "Connect your Sheet in Settings to see this."; return; }
+  box.innerHTML = '<span class="spinner"></span> loading...';
+  try {
+    const data = await sheetGet("holdings");
+    if (!data.holdings || !data.holdings.length) { box.textContent = "No open positions logged yet."; return; }
+    // pin held tickers automatically so the screener always shows them
+    data.holdings.forEach(h => { if (!state.pinned.includes(h.ticker)) state.pinned.push(h.ticker); });
+    save(LS.pinned, state.pinned);
+    renderSettings();
+    box.innerHTML = data.holdings.map(h =>
+      `<div>${h.ticker} — ${h.qty} shares @ avg RM${Number(h.avgCost).toFixed(3)}</div>`
+    ).join("");
+  } catch (e) {
+    box.textContent = "Could not reach your Sheet. Check the URL/secret in Settings.";
+  }
+}
+loadHoldings();
+
+/* ---------- manual trade log ---------- */
+document.getElementById("logTrade").addEventListener("click", async () => {
+  const status = document.getElementById("logStatus");
+  const payload = {
+    action: "log",
+    date: document.getElementById("tDate").value || new Date().toISOString().slice(0, 10),
+    side: document.getElementById("tSide").value,
+    ticker: document.getElementById("tTicker").value.trim().toUpperCase(),
+    qty: Number(document.getElementById("tQty").value),
+    price: Number(document.getElementById("tPrice").value)
+  };
+  if (!payload.ticker || !payload.qty || !payload.price) { status.textContent = "Fill in ticker, qty and price."; return; }
+  status.innerHTML = '<span class="spinner"></span> saving...';
+  try {
+    await sheetPost(payload);
+    status.textContent = "Logged.";
+    loadHoldings();
+  } catch (e) {
+    status.textContent = "Failed — check Sheet connection in Settings.";
+  }
+});
+
+/* ---------- Moomoo CSV import ---------- */
+function parseMoomooCsv(text) {
+  // Moomoo export: quoted CSV, header row, one row per order (some split across
+  // multiple partial fills — only rows with Status "Filled" and a Fill Qty count).
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length);
+  const parseLine = l => l.match(/(".*?"|[^,]+)(?=,|$)/g).map(c => c.replace(/^"|"$/g, ""));
+  const header = parseLine(lines[0]);
+  const idx = name => header.indexOf(name);
+  const out = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseLine(lines[i]);
+    const status = cols[idx("Status")];
+    const fillQty = Number(cols[idx("Fill Qty")]);
+    if (status !== "Filled" || !fillQty) continue;
+    out.push({
+      side: cols[idx("Side")],
+      ticker: cols[idx("Symbol")] + ".KL",
+      name: cols[idx("Name")],
+      qty: fillQty,
+      price: Number(cols[idx("Fill Price")]),
+      date: (cols[idx("Fill Time")] || "").slice(0, 11).trim(),
+      // stable id so re-importing the same export never double-logs a fill
+      id: [cols[idx("Symbol")], cols[idx("Fill Time")], fillQty, cols[idx("Fill Price")]].join("|")
+    });
+  }
+  return out;
+}
+
+document.getElementById("importCsv").addEventListener("click", async () => {
+  const status = document.getElementById("importStatus");
+  const file = document.getElementById("csvFile").files[0];
+  if (!file) { status.textContent = "Choose a CSV file first."; return; }
+  const text = await file.text();
+  let fills;
+  try { fills = parseMoomooCsv(text); } catch (e) { status.textContent = "Could not parse this CSV."; return; }
+  const newFills = fills.filter(f => !state.loggedIds.includes(f.id));
+  if (!newFills.length) { status.textContent = "Nothing new to sync."; return; }
+  status.innerHTML = `<span class="spinner"></span> syncing ${newFills.length} fill(s)...`;
+  let ok = 0;
+  for (const f of newFills) {
+    try {
+      await sheetPost({ action: "log", date: f.date, side: f.side, ticker: f.ticker, qty: f.qty, price: f.price, source: "moomoo-csv" });
+      state.loggedIds.push(f.id);
+      ok++;
+    } catch (e) { /* keep going, report partial success below */ }
+  }
+  save(LS.loggedIds, state.loggedIds);
+  status.textContent = `Synced ${ok}/${newFills.length} new fill(s).`;
+  loadHoldings();
+});
+</script>
+</body>
+</html>
