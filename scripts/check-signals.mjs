@@ -21,6 +21,7 @@ const {
 } = process.env;
 
 const STATE_PATH = path.join(process.cwd(), "data", "last-signals.json");
+const COOLDOWN_DAYS = 30; // matches index.html — flag churn instead of nudging a fresh trade right after one
 
 async function fetchJSON(url, opts) {
   const r = await fetch(url, opts);
@@ -115,6 +116,16 @@ async function getCashAvailable() {
   }
 }
 
+async function getRecentTrades() {
+  if (!SHEET_ENDPOINT || !SHEET_SECRET) return {};
+  try {
+    const data = await fetchJSON(`${SHEET_ENDPOINT}?secret=${encodeURIComponent(SHEET_SECRET)}&action=recentTrades`);
+    return data.recentTrades || {};
+  } catch {
+    return {};
+  }
+}
+
 async function loadState() {
   try {
     return JSON.parse(await readFile(STATE_PATH, "utf8"));
@@ -144,6 +155,7 @@ async function main() {
   const universe = JSON.parse(await readFile(path.join(process.cwd(), "universe.json"), "utf8"));
   const held = await getHeldTickers();
   const cash = await getCashAvailable(); // used only for a yes/no fit check, never logged or messaged as a number
+  const recentTrades = await getRecentTrades(); // ticker -> {date, side}, for the cooldown note below
 
   const heldSet = new Set(held.map(t => t.toUpperCase()));
   for (const t of held) {
@@ -179,9 +191,15 @@ async function main() {
     const prevSignal = prevState[stock.code];
     if (prevSignal !== cls.signal) {
       const fitLine = fitsBudget == null ? "" : `\nFits your current budget: ${fitsBudget ? "yes" : "no"}`;
+      const rt = recentTrades[stock.code.toUpperCase()];
+      let cooldownLine = "";
+      if (rt) {
+        const days = Math.floor((Date.now() - new Date(rt.date).getTime()) / 86400000);
+        if (days < COOLDOWN_DAYS) cooldownLine = `\n⚠️ You ${rt.side.toLowerCase()}ed this ${days}d ago — mind fee drag before trading again`;
+      }
       changes.push(
         `*${stock.code}* (${stock.name})${isHeld ? " — held" : ""}\n` +
-        `${prevSignal ? prevSignal + " → " : ""}*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · RM${price.toFixed(3)}${fitLine}`
+        `${prevSignal ? prevSignal + " → " : ""}*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · RM${price.toFixed(3)}${fitLine}${cooldownLine}`
       );
     }
   }

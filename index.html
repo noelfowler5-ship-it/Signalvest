@@ -32,6 +32,7 @@
   .pill.HOLD{background:rgba(241,196,15,.15);color:var(--hold)}
   .pill.AVOID{background:rgba(231,76,60,.15);color:var(--avoid)}
   .muted{color:var(--muted)}
+  .cooldown{color:var(--avoid);font-weight:600}
   .warn{background:rgba(231,76,60,.12);border:1px solid rgba(231,76,60,.35);color:#ff8a80;padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}
   .hidden{display:none}
   .tag{cursor:pointer;color:var(--accent);font-size:12px}
@@ -60,7 +61,7 @@
       <div class="row" style="justify-content:space-between">
         <div>
           <div style="font-weight:600">Watchlist screener</div>
-          <div class="muted" style="font-size:12px">Screens the bundled universe + anything you're holding, sized to your budget.</div>
+          <div class="muted" style="font-size:12px">Shows what you hold, plus your top 3 new candidates — not every match, since RM800 only ever buys 1-2 lots anyway.</div>
         </div>
         <button class="btn" id="runScreen">Run screener</button>
       </div>
@@ -68,7 +69,7 @@
     </div>
     <div class="panel" id="resultsPanel" style="display:none">
       <table>
-        <thead><tr><th>Ticker</th><th>Price (RM)</th><th>Trend</th><th>RSI14</th><th>Signal</th><th>100-lot cost</th><th>Fits budget</th></tr></thead>
+        <thead><tr><th>Ticker</th><th>Price (RM)</th><th>Trend</th><th>RSI14</th><th>Signal</th><th>100-lot cost</th><th>Fits budget</th><th>Last traded</th></tr></thead>
         <tbody id="resultsBody"></tbody>
       </table>
     </div>
@@ -169,8 +170,12 @@ let state = {
   pinned: load(LS.pinned, []),
   sheetUrl: load(LS.sheetUrl, ""),
   sheetSecret: load(LS.sheetSecret, ""),
-  loggedIds: load(LS.loggedIds, [])
+  loggedIds: load(LS.loggedIds, []),
+  recentTrades: {} // ticker -> {date, side}, fetched from Sheet each session, not persisted
 };
+
+const TOP_CANDIDATES = 3; // you can only realistically act on 1-2 picks at RM800 budget; don't pretend otherwise
+const COOLDOWN_DAYS = 30; // flag re-buying/re-selling something you just traded — fee drag matters more at small size
 
 /* ---------- tabs ---------- */
 document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => {
@@ -305,15 +310,34 @@ async function runScreener() {
       const fitsBudget = lotCost <= cash;
       if (!isPinned && !liquid) continue; // skip illiquid names unless you're already tracking them
       if (!isPinned && !fitsBudget) continue; // pure screener: only surface what you could actually buy a lot of
-      rows.push({ ...stock, price, lotCost, fitsBudget, isPinned, ...cls });
+      const trendStrength = (cls.sma20 - cls.sma50) / cls.sma50; // proxy for conviction, not a quality judgement
+      rows.push({ ...stock, price, lotCost, fitsBudget, isPinned, trendStrength, ...cls });
     } catch (e) {
       // one bad ticker shouldn't kill the run
       continue;
     }
   }
 
-  rows.sort((a, b) => (a.signal === "BUY" ? -1 : 0) - (b.signal === "BUY" ? -1 : 0));
-  for (const r of rows) {
+  // Held positions: always show, you need to monitor what you actually own.
+  const heldRows = rows.filter(r => r.isPinned);
+  // New candidates: don't pretend a RM800 budget can act on 20 names — surface
+  // only the strongest few BUY signals (ranked by trend confirmation), same
+  // spirit as "you can only really hold 1-2 positions, so stop browsing".
+  const buyCandidates = rows.filter(r => !r.isPinned && r.signal === "BUY")
+    .sort((a, b) => b.trendStrength - a.trendStrength);
+  const topCandidates = buyCandidates.slice(0, TOP_CANDIDATES);
+  const shown = [...heldRows, ...topCandidates];
+
+  const now = Date.now();
+  for (const r of shown) {
+    const rt = state.recentTrades[r.code.toUpperCase()];
+    let lastTradedHtml = '<span class="muted">—</span>';
+    if (rt) {
+      const days = Math.floor((now - new Date(rt.date).getTime()) / 86400000);
+      lastTradedHtml = days < COOLDOWN_DAYS
+        ? `<span class="cooldown">${days}d ago (${rt.side})</span>`
+        : `<span class="muted">${days}d ago</span>`;
+    }
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${r.code}${r.isPinned ? ' <span class="muted">(held)</span>' : ""}<br><span class="muted">${r.name}</span></td>
@@ -322,10 +346,11 @@ async function runScreener() {
       <td>${r.rsi.toFixed(1)}</td>
       <td><span class="pill ${r.signal}">${r.signal}</span></td>
       <td>RM ${r.lotCost.toFixed(2)}</td>
-      <td>${r.fitsBudget ? "yes" : "no"}</td>`;
+      <td>${r.fitsBudget ? "yes" : "no"}</td>
+      <td>${lastTradedHtml}</td>`;
     resultsBody.appendChild(tr);
   }
-  status.textContent = `${rows.length} candidate(s) shown — screened ${universe.length}. Not financial advice.`;
+  status.textContent = `Top ${topCandidates.length} new candidate(s) shown (of ${buyCandidates.length} BUY signal(s) among ${universe.length} screened) + ${heldRows.length} held position(s). Not financial advice.`;
   btn.disabled = false;
 }
 document.getElementById("runScreen").addEventListener("click", runScreener);
@@ -372,6 +397,7 @@ document.getElementById("saveSheet").addEventListener("click", () => {
   save(LS.sheetSecret, state.sheetSecret);
   document.getElementById("sheetStatus").textContent = "Saved.";
   loadHoldings();
+  loadRecentTrades();
 });
 renderSettings();
 
@@ -411,7 +437,18 @@ async function loadHoldings() {
     box.textContent = "Could not reach your Sheet. Check the URL/secret in Settings.";
   }
 }
+
+async function loadRecentTrades() {
+  if (!state.sheetUrl) { state.recentTrades = {}; return; }
+  try {
+    const data = await sheetGet("recentTrades");
+    state.recentTrades = data.recentTrades || {};
+  } catch (e) {
+    state.recentTrades = {}; // non-fatal — screener just won't show cooldown info
+  }
+}
 loadHoldings();
+loadRecentTrades();
 
 /* ---------- manual trade log ---------- */
 document.getElementById("logTrade").addEventListener("click", async () => {
@@ -430,6 +467,7 @@ document.getElementById("logTrade").addEventListener("click", async () => {
     await sheetPost(payload);
     status.textContent = "Logged.";
     loadHoldings();
+    loadRecentTrades();
   } catch (e) {
     status.textContent = "Failed — check Sheet connection in Settings.";
   }
@@ -484,6 +522,7 @@ document.getElementById("importCsv").addEventListener("click", async () => {
   save(LS.loggedIds, state.loggedIds);
   status.textContent = `Synced ${ok}/${newFills.length} new fill(s).`;
   loadHoldings();
+  loadRecentTrades();
 });
 </script>
 </body>

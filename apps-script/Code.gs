@@ -114,6 +114,23 @@ function doGet(e) {
     return json_({ cashAvailable: Number(budget.getRange("B1").getValue()) || 0 });
   }
 
+  // Last trade date per ticker (any side) — lets the app warn "you just
+  // traded this Xd ago" instead of nudging you into a fresh buy every time
+  // a mechanical signal flips. Scans the whole log; fine at personal scale.
+  if (action === "recentTrades") {
+    const tx = ss.getSheetByName(SHEET_NAMES.TRANSACTIONS);
+    const rows = tx.getDataRange().getValues().slice(1).filter(r => r[0] && r[2]);
+    const last = {};
+    rows.forEach(r => {
+      const ticker = String(r[2]).toUpperCase();
+      const date = new Date(r[0]);
+      if (!last[ticker] || date > new Date(last[ticker].date)) {
+        last[ticker] = { date: Utilities.formatDate(date, Session.getScriptTimeZone(), "yyyy-MM-dd"), side: r[1] };
+      }
+    });
+    return json_({ recentTrades: last });
+  }
+
   return json_({ error: "unknown action" });
 }
 
