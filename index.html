@@ -475,7 +475,13 @@ async function sheetPost(payload) {
     headers: { "Content-Type": "text/plain;charset=utf-8" }, // avoids a CORS preflight against Apps Script
     body: JSON.stringify({ ...payload, secret: state.sheetSecret })
   });
-  return await r.json();
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error(`Sheet returned non-JSON (HTTP ${r.status}): ${text.slice(0, 120)}`); }
+  if (data.error) throw new Error(`Sheet error: ${data.error}`);
+  if (!r.ok) throw new Error(`Sheet request failed (HTTP ${r.status})`);
+  return data;
 }
 
 async function loadHoldings() {
@@ -562,7 +568,7 @@ document.getElementById("logTrade").addEventListener("click", async () => {
     loadHoldings();
     loadRecentTrades();
   } catch (e) {
-    status.textContent = "Failed — check Sheet connection in Settings.";
+    status.textContent = "Failed: " + e.message;
   }
 });
 
@@ -605,15 +611,18 @@ document.getElementById("importCsv").addEventListener("click", async () => {
   if (!newFills.length) { status.textContent = "Nothing new to sync."; return; }
   status.innerHTML = `<span class="spinner"></span> syncing ${newFills.length} fill(s)...`;
   let ok = 0;
+  let firstError = null;
   for (const f of newFills) {
     try {
       await sheetPost({ action: "log", date: f.date, side: f.side, ticker: f.ticker, qty: f.qty, price: f.price, source: "moomoo-csv" });
       state.loggedIds.push(f.id);
       ok++;
-    } catch (e) { /* keep going, report partial success below */ }
+    } catch (e) {
+      if (!firstError) firstError = e.message; // keep going, but remember the reason for the status line
+    }
   }
   save(LS.loggedIds, state.loggedIds);
-  status.textContent = `Synced ${ok}/${newFills.length} new fill(s).`;
+  status.textContent = `Synced ${ok}/${newFills.length} new fill(s).` + (firstError ? ` First error: ${firstError}` : "");
   loadHoldings();
   loadRecentTrades();
 });
