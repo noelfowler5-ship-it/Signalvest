@@ -155,6 +155,7 @@
         <button class="btn secondary" id="saveSheet">Save</button>
         <span id="sheetStatus" class="muted" style="font-size:12px"></span>
       </div>
+      <div id="sheetDebug" class="muted" style="font-size:11px;margin-top:8px"></div>
     </div>
   </section>
 
@@ -193,6 +194,7 @@ document.querySelectorAll("nav button").forEach(b => b.addEventListener("click",
   b.classList.add("active");
   document.querySelectorAll("main > section").forEach(s => s.classList.add("hidden"));
   document.getElementById("tab-" + b.dataset.tab).classList.remove("hidden");
+  if (b.dataset.tab === "settings") renderSettings(); // always show a fresh read, not a stale one from page load
 }));
 
 /* ---------- defensive price fetch (Yahoo blocks browser CORS; proxy fallback chain) ---------- */
@@ -420,6 +422,7 @@ function renderSettings() {
   document.getElementById("sheetUrl").value = state.sheetUrl || "";
   document.getElementById("sheetSecret").value = state.sheetSecret || "";
   document.getElementById("cashHeader").textContent = state.cash ? `Budget: RM ${Number(state.cash).toFixed(2)}` : "";
+  updateSheetDebug();
   const pinList = document.getElementById("pinList");
   pinList.innerHTML = "";
   state.pinned.forEach(t => {
@@ -437,6 +440,27 @@ function renderSettings() {
     pinList.appendChild(span);
   });
 }
+
+// Reads localStorage directly (bypassing the in-memory `state` object) so we
+// can tell apart "never actually saved" from "saved, but this tab/instance
+// hasn't picked it up" — the two failure modes look identical otherwise.
+function updateSheetDebug() {
+  const el = document.getElementById("sheetDebug");
+  if (!el) return;
+  const storedUrl = localStorage.getItem(LS.sheetUrl);
+  const storedSecret = localStorage.getItem(LS.sheetSecret);
+  let storedUrlVal = "", storedSecretVal = "";
+  try { storedUrlVal = storedUrl ? JSON.parse(storedUrl) : ""; } catch { storedUrlVal = storedUrl || ""; }
+  try { storedSecretVal = storedSecret ? JSON.parse(storedSecret) : ""; } catch { storedSecretVal = storedSecret || ""; }
+  const memOk = !!state.sheetUrl && !!state.sheetSecret;
+  const storeOk = !!storedUrlVal && !!storedSecretVal;
+  el.innerHTML =
+    `This tab's connection: <b>${memOk ? "connected" : "NOT connected"}</b> ` +
+    `(URL ${state.sheetUrl ? state.sheetUrl.length + " chars" : "empty"}, secret ${state.sheetSecret ? "set" : "empty"})<br>` +
+    `Saved in this browser: <b>${storeOk ? "yes" : "NO"}</b> ` +
+    `(URL ${storedUrlVal ? storedUrlVal.length + " chars" : "empty"}, secret ${storedSecretVal ? "set" : "empty"})`;
+}
+
 document.getElementById("cashInput").addEventListener("change", e => {
   state.cash = Number(e.target.value) || 0;
   save(LS.cash, state.cash);
@@ -462,14 +486,24 @@ renderSettings();
 
 /* ---------- sheet sync ---------- */
 async function sheetGet(action) {
-  if (!state.sheetUrl) throw new Error("no sheet connected");
+  if (!state.sheetUrl) {
+    const storedHasUrl = !!localStorage.getItem(LS.sheetUrl);
+    throw new Error(storedHasUrl
+      ? "no sheet connected in this tab (but a URL IS saved in this browser — reload the page, don't just switch tabs)"
+      : "no sheet connected (nothing saved in this browser yet — go to Settings and tap Save)");
+  }
   const url = `${state.sheetUrl}?secret=${encodeURIComponent(state.sheetSecret)}&action=${action}`;
   const r = await fetch(url);
   if (!r.ok) throw new Error("sheet request failed");
   return await r.json();
 }
 async function sheetPost(payload) {
-  if (!state.sheetUrl) throw new Error("no sheet connected");
+  if (!state.sheetUrl) {
+    const storedHasUrl = !!localStorage.getItem(LS.sheetUrl);
+    throw new Error(storedHasUrl
+      ? "no sheet connected in this tab (but a URL IS saved in this browser — reload the page, don't just switch tabs)"
+      : "no sheet connected (nothing saved in this browser yet — go to Settings and tap Save)");
+  }
   const r = await fetch(state.sheetUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" }, // avoids a CORS preflight against Apps Script
