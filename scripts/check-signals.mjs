@@ -39,11 +39,21 @@ async function fetchHistory(ticker) {
       const data = await fetchJSON(url);
       const result = data?.chart?.result?.[0];
       if (!result) throw new Error("no result for " + ticker);
-      const closes = result.indicators?.quote?.[0]?.close || [];
-      const volumes = result.indicators?.quote?.[0]?.volume || [];
+      const q = result.indicators?.quote?.[0] || {};
+      const closes = q.close || [];
+      const volumes = q.volume || [];
+      const highs = q.high || [];
+      const lows = q.low || [];
       const clean = [];
       for (let j = 0; j < closes.length; j++) {
-        if (closes[j] != null) clean.push({ close: closes[j], volume: volumes[j] || 0 });
+        if (closes[j] != null) {
+          clean.push({
+            close: closes[j],
+            volume: volumes[j] || 0,
+            high: highs[j] != null ? highs[j] : closes[j],
+            low: lows[j] != null ? lows[j] : closes[j]
+          });
+        }
       }
       return clean;
     } catch (e) {
@@ -95,15 +105,52 @@ function classify(closes) {
   return { trend, rsi: r, signal };
 }
 
-async function getHeldTickers() {
+async function getHoldings() {
   if (!SHEET_ENDPOINT || !SHEET_SECRET) return [];
   try {
     const data = await fetchJSON(`${SHEET_ENDPOINT}?secret=${encodeURIComponent(SHEET_SECRET)}&action=holdings`);
-    return (data.holdings || []).map(h => h.ticker);
+    return data.holdings || [];
   } catch {
     console.log("could not reach Sheet for holdings — continuing with bundled universe only");
     return [];
   }
+}
+
+function atr14(highs, lows, closes) {
+  const period = 14;
+  if (highs.length < period + 1) return null;
+  const trs = [];
+  for (let i = 1; i < highs.length; i++) {
+    trs.push(Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    ));
+  }
+  let a = trs.slice(0, period).reduce((x, y) => x + y, 0) / period;
+  for (let i = period; i < trs.length; i++) a = (a * (period - 1) + trs[i]) / period;
+  return a;
+}
+
+// Same rule as index.html: 2xATR hard stop below entry, 3xATR Chandelier trailing
+// stop once you're in enough profit for it to be above the hard stop. Advisory
+// only — this script never places or modifies an order.
+function computeStopInfo(hist, avgCost) {
+  const closes = hist.map(h => h.close), highs = hist.map(h => h.high), lows = hist.map(h => h.low);
+  const atr = atr14(highs, lows, closes);
+  if (atr == null) return null;
+  const currentPrice = closes[closes.length - 1];
+  const lookback = Math.min(22, highs.length);
+  const highestHigh = Math.max(...highs.slice(-lookback));
+  const hardStop = avgCost - 2 * atr;
+  const chandelier = highestHigh - 3 * atr;
+  const operative = Math.max(hardStop, chandelier);
+  let state;
+  if (currentPrice <= operative) state = "breached";
+  else if (currentPrice <= operative * 1.03) state = "near";
+  else if (chandelier > hardStop) state = "trailing";
+  else state = "initial";
+  return { atr, currentPrice, hardStop, chandelier, operative, state };
 }
 
 async function getCashAvailable() {
@@ -128,9 +175,10 @@ async function getRecentTrades() {
 
 async function loadState() {
   try {
-    return JSON.parse(await readFile(STATE_PATH, "utf8"));
+    const s = JSON.parse(await readFile(STATE_PATH, "utf8"));
+    return { signals: s.signals || {}, stops: s.stops || {} };
   } catch {
-    return {};
+    return { signals: {}, stops: {} };
   }
 }
 
@@ -153,18 +201,21 @@ async function sendTelegram(text) {
 
 async function main() {
   const universe = JSON.parse(await readFile(path.join(process.cwd(), "universe.json"), "utf8"));
-  const held = await getHeldTickers();
+  const holdings = await getHoldings();
   const cash = await getCashAvailable(); // used only for a yes/no fit check, never logged or messaged as a number
   const recentTrades = await getRecentTrades(); // ticker -> {date, side}, for the cooldown note below
 
-  const heldSet = new Set(held.map(t => t.toUpperCase()));
-  for (const t of held) {
-    if (!universe.find(u => u.code.toUpperCase() === t.toUpperCase())) universe.push({ code: t, name: t });
+  const heldSet = new Set(holdings.map(h => h.ticker.toUpperCase()));
+  const avgCostByTicker = new Map(holdings.map(h => [h.ticker.toUpperCase(), Number(h.avgCost)]));
+  for (const h of holdings) {
+    if (!universe.find(u => u.code.toUpperCase() === h.ticker.toUpperCase())) universe.push({ code: h.ticker, name: h.ticker });
   }
 
   const prevState = await loadState();
-  const nextState = {};
+  const nextSignals = {};
+  const nextStops = {};
   const changes = [];
+  const stopAlerts = [];
 
   for (const stock of universe) {
     let hist;
@@ -187,8 +238,8 @@ async function main() {
     const fitsBudget = cash == null ? null : price * 100 <= cash;
     if (!isHeld && cash != null && fitsBudget === false) continue;
 
-    nextState[stock.code] = cls.signal;
-    const prevSignal = prevState[stock.code];
+    nextSignals[stock.code] = cls.signal;
+    const prevSignal = prevState.signals[stock.code];
     if (prevSignal !== cls.signal) {
       const fitLine = fitsBudget == null ? "" : `\nFits your current budget: ${fitsBudget ? "yes" : "no"}`;
       const rt = recentTrades[stock.code.toUpperCase()];
@@ -202,16 +253,39 @@ async function main() {
         `${prevSignal ? prevSignal + " → " : ""}*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · RM${price.toFixed(3)}${fitLine}${cooldownLine}`
       );
     }
+
+    // Stop-loss / trailing-stop: only meaningful for positions you actually hold.
+    if (isHeld) {
+      const avgCost = avgCostByTicker.get(stock.code.toUpperCase());
+      const info = avgCost != null ? computeStopInfo(hist, avgCost) : null;
+      if (info) {
+        nextStops[stock.code] = info.state;
+        const prevStopState = prevState.stops[stock.code];
+        if (prevStopState !== info.state) {
+          const labels = {
+            breached: `🔴 stop level breached — RM${info.operative.toFixed(3)}. This is where a disciplined exit would trigger.`,
+            near: `🟡 within 3% of your stop level (RM${info.operative.toFixed(3)}). Watch closely.`,
+            trailing: `🟢 up enough to switch to a trailing stop — new stop RM${info.operative.toFixed(3)} (was hard stop RM${info.hardStop.toFixed(3)}).`,
+            initial: `ℹ️ hard stop-loss suggested at RM${info.hardStop.toFixed(3)} (2×ATR below your average cost).`
+          };
+          stopAlerts.push(`*${stock.code}* (${stock.name})\n${labels[info.state]}`);
+        }
+      }
+    }
   }
 
-  if (changes.length) {
-    await sendTelegram(`*Signalvest update*\n\n${changes.join("\n\n")}\n\n_Not financial advice._`);
-    console.log(`sent ${changes.length} signal change(s)`);
+  const sections = [];
+  if (changes.length) sections.push(`*Signal changes*\n\n${changes.join("\n\n")}`);
+  if (stopAlerts.length) sections.push(`*Stop-loss / trailing-stop*\n\n${stopAlerts.join("\n\n")}`);
+
+  if (sections.length) {
+    await sendTelegram(`*Signalvest update*\n\n${sections.join("\n\n")}\n\n_Not financial advice — you place any exit yourself._`);
+    console.log(`sent ${changes.length} signal change(s), ${stopAlerts.length} stop alert(s)`);
   } else {
-    console.log("no signal changes this run");
+    console.log("no signal or stop changes this run");
   }
 
-  await saveState(nextState);
+  await saveState({ signals: nextSignals, stops: nextStops });
 }
 
 main().catch(err => {

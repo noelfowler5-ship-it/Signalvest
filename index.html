@@ -108,6 +108,16 @@
       <div style="font-weight:600;margin-bottom:6px">Holdings (from your Sheet)</div>
       <div id="holdingsBox" class="muted" style="font-size:13px">Connect your Sheet in Settings to see this.</div>
     </div>
+
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:6px">Stop-loss / trailing-stop guide</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">
+        Mechanical suggestion, not an order — a hard stop at 2×ATR below your average cost,
+        switching to a 3×ATR trailing (Chandelier) stop once you're far enough in profit for one
+        to matter. You still place any exit yourself with your broker.
+      </div>
+      <div id="stopBox" class="muted" style="font-size:13px">Connect your Sheet in Settings to see this.</div>
+    </div>
   </section>
 
   <section id="tab-settings" class="hidden">
@@ -216,12 +226,22 @@ async function fetchHistory(ticker) {
   const data = await fetchJSON(url);
   const result = data?.chart?.result?.[0];
   if (!result) throw new Error("no data for " + ticker);
-  const closes = result.indicators?.quote?.[0]?.close || [];
-  const volumes = result.indicators?.quote?.[0]?.volume || [];
+  const q = result.indicators?.quote?.[0] || {};
+  const closes = q.close || [];
+  const volumes = q.volume || [];
+  const highs = q.high || [];
+  const lows = q.low || [];
   // drop trailing/leading nulls (non-trading days in range)
   const clean = [];
   for (let i = 0; i < closes.length; i++) {
-    if (closes[i] != null) clean.push({ close: closes[i], volume: volumes[i] || 0 });
+    if (closes[i] != null) {
+      clean.push({
+        close: closes[i],
+        volume: volumes[i] || 0,
+        high: highs[i] != null ? highs[i] : closes[i],
+        low: lows[i] != null ? lows[i] : closes[i]
+      });
+    }
   }
   return clean;
 }
@@ -267,6 +287,45 @@ function classify(closes) {
   else if (trend === "down") signal = "AVOID";
   else signal = "HOLD";
   return { trend, rsi: r, signal, sma20: s20, sma50: s50 };
+}
+
+/* ---------- stop-loss / trailing-stop (ATR-based, Wilder's smoothing like RSI) ---------- */
+function atr14(highs, lows, closes) {
+  const period = 14;
+  if (highs.length < period + 1) return null;
+  const trs = [];
+  for (let i = 1; i < highs.length; i++) {
+    trs.push(Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1])
+    ));
+  }
+  let a = trs.slice(0, period).reduce((x, y) => x + y, 0) / period;
+  for (let i = period; i < trs.length; i++) a = (a * (period - 1) + trs[i]) / period;
+  return a;
+}
+
+// Hard stop = 2xATR below your entry (initial risk limit).
+// Trailing (Chandelier) stop = highest high of the last 22 sessions minus 3xATR — only
+// takes over once it's above the hard stop, i.e. once you're far enough in profit to matter.
+// The operative stop never moves down. Advisory only — this never places or modifies an order.
+function computeStopInfo(hist, avgCost) {
+  const closes = hist.map(h => h.close), highs = hist.map(h => h.high), lows = hist.map(h => h.low);
+  const atr = atr14(highs, lows, closes);
+  if (atr == null) return null;
+  const currentPrice = closes[closes.length - 1];
+  const lookback = Math.min(22, highs.length);
+  const highestHigh = Math.max(...highs.slice(-lookback));
+  const hardStop = avgCost - 2 * atr;
+  const chandelier = highestHigh - 3 * atr;
+  const operative = Math.max(hardStop, chandelier);
+  let state;
+  if (currentPrice <= operative) state = "breached";
+  else if (currentPrice <= operative * 1.03) state = "near";
+  else if (chandelier > hardStop) state = "trailing";
+  else state = "initial";
+  return { atr, currentPrice, hardStop, chandelier, operative, state };
 }
 
 /* ---------- screener ---------- */
@@ -433,9 +492,43 @@ async function loadHoldings() {
     box.innerHTML = data.holdings.map(h =>
       `<div>${h.ticker} — ${h.qty} shares @ avg RM${Number(h.avgCost).toFixed(3)}</div>`
     ).join("");
+    renderStopLevels(data.holdings);
   } catch (e) {
     box.textContent = "Could not reach your Sheet. Check the URL/secret in Settings.";
   }
+}
+
+const STOP_PILL = {
+  breached: ["AVOID", "STOP HIT"],
+  near: ["HOLD", "NEAR STOP"],
+  trailing: ["BUY", "TRAILING"],
+  initial: ["", "HARD STOP SET"]
+};
+
+async function renderStopLevels(holdings) {
+  const box = document.getElementById("stopBox");
+  if (!holdings || !holdings.length) { box.textContent = "No open positions to protect."; return; }
+  box.innerHTML = '<span class="spinner"></span> computing stop levels...';
+  const lines = [];
+  for (const h of holdings) {
+    try {
+      const hist = await fetchHistory(h.ticker);
+      const info = computeStopInfo(hist, Number(h.avgCost));
+      if (!info) { lines.push(`<div>${h.ticker} — <span class="muted">not enough price history yet</span></div>`); continue; }
+      const [pillClass, pillLabel] = STOP_PILL[info.state];
+      const pill = pillClass ? `<span class="pill ${pillClass}">${pillLabel}</span>` : `<span class="muted">${pillLabel}</span>`;
+      const trailNote = info.state === "trailing" || info.state === "near" || info.state === "breached"
+        ? ` (trailing, was hard stop RM${info.hardStop.toFixed(3)})` : "";
+      lines.push(`
+        <div style="padding:6px 0;border-bottom:1px solid var(--border)">
+          <div>${h.ticker} — RM${info.currentPrice.toFixed(3)} ${pill}</div>
+          <div class="muted" style="font-size:12px">avg cost RM${Number(h.avgCost).toFixed(3)} · stop RM${info.operative.toFixed(3)}${trailNote}</div>
+        </div>`);
+    } catch (e) {
+      lines.push(`<div>${h.ticker} — <span class="muted">could not fetch price</span></div>`);
+    }
+  }
+  box.innerHTML = lines.join("");
 }
 
 async function loadRecentTrades() {
