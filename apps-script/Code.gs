@@ -41,16 +41,19 @@ function setupSheet() {
   hold.getRange("A2").setFormula(
     '=SORT(UNIQUE(FILTER(Transactions!C2:C, Transactions!C2:C<>"")))'
   );
-  // Net qty held = buys - sells.
+  // Net qty held = buys - sells. MAP+LAMBDA, not SUMIFS nested straight inside
+  // ARRAYFORMULA — the latter doesn't vectorize per row when its own criteria
+  // come from another formula's array output (every row silently repeats
+  // row 2's result). See fixHoldingsFormulas() for the standalone repair.
   hold.getRange("B2").setFormula(
-    '=ARRAYFORMULA(IF(A2:A="","",' +
-      'SUMIFS(Transactions!D:D,Transactions!C:C,A2:A,Transactions!B:B,"Buy") - ' +
-      'SUMIFS(Transactions!D:D,Transactions!C:C,A2:A,Transactions!B:B,"Sell")))'
+    '=MAP(A2:A, LAMBDA(t, IF(t="", "", ' +
+      'SUMIFS(Transactions!D:D,Transactions!C:C,t,Transactions!B:B,"Buy") - ' +
+      'SUMIFS(Transactions!D:D,Transactions!C:C,t,Transactions!B:B,"Sell"))))'
   );
   hold.getRange("C2").setFormula(
-    '=ARRAYFORMULA(IF(A2:A="","",IFERROR(' +
-      'SUMIFS(Transactions!F:F,Transactions!C:C,A2:A,Transactions!B:B,"Buy") / ' +
-      'SUMIFS(Transactions!D:D,Transactions!C:C,A2:A,Transactions!B:B,"Buy"),0)))'
+    '=MAP(A2:A, LAMBDA(t, IF(t="", "", IFERROR(' +
+      'SUMIFS(Transactions!F:F,Transactions!C:C,t,Transactions!B:B,"Buy") / ' +
+      'SUMIFS(Transactions!D:D,Transactions!C:C,t,Transactions!B:B,"Buy"),0))))'
   );
   hold.getRange("D2").setFormula('=ARRAYFORMULA(IF(A2:A="","",B2:B*C2:C))');
 
@@ -181,6 +184,30 @@ function doPost(e) {
   }
 
   return json_({ error: "unknown action" });
+}
+
+/**
+ * One-time fix for a Google Sheets formula bug: the original Holdings
+ * formulas (SUMIFS nested inside ARRAYFORMULA, with the criteria itself
+ * coming from another formula's array output) don't vectorize per row in
+ * Sheets — every row silently repeats row 2's result instead of computing
+ * its own ticker. MAP+LAMBDA calls the calculation once per ticker properly.
+ * Safe to run any time; does not touch Transactions data.
+ */
+function fixHoldingsFormulas() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const hold = ss.getSheetByName(SHEET_NAMES.HOLDINGS);
+  hold.getRange("B2").setFormula(
+    '=MAP(A2:A, LAMBDA(t, IF(t="", "", ' +
+      'SUMIFS(Transactions!D:D,Transactions!C:C,t,Transactions!B:B,"Buy") - ' +
+      'SUMIFS(Transactions!D:D,Transactions!C:C,t,Transactions!B:B,"Sell"))))'
+  );
+  hold.getRange("C2").setFormula(
+    '=MAP(A2:A, LAMBDA(t, IF(t="", "", IFERROR(' +
+      'SUMIFS(Transactions!F:F,Transactions!C:C,t,Transactions!B:B,"Buy") / ' +
+      'SUMIFS(Transactions!D:D,Transactions!C:C,t,Transactions!B:B,"Buy"),0))))'
+  );
+  ss.toast("Holdings formulas fixed — each ticker now computes its own qty/avg cost.");
 }
 
 function json_(obj) {

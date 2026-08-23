@@ -655,27 +655,33 @@ document.getElementById("logTrade").addEventListener("click", async () => {
 
 /* ---------- Moomoo CSV import ---------- */
 function parseMoomooCsv(text) {
-  // Moomoo export: quoted CSV, header row, one row per order (some split across
-  // multiple partial fills — only rows with Status "Filled" and a Fill Qty count).
+  // Moomoo export: quoted CSV, header row, one row per order — but an order
+  // filled in multiple pieces gets EXTRA rows for the later pieces with
+  // Symbol/Side/Status left blank (only the fill columns are populated).
+  // Those continuation rows carry forward the parent row's ticker/side, and
+  // a real fill (any status text or blank) always has a nonzero Fill Qty —
+  // that's what actually distinguishes a fill from a Cancelled/Queued row.
   const lines = text.split(/\r?\n/).filter(l => l.trim().length);
   const parseLine = l => l.match(/(".*?"|[^,]+)(?=,|$)/g).map(c => c.replace(/^"|"$/g, ""));
   const header = parseLine(lines[0]);
   const idx = name => header.indexOf(name);
   const out = [];
+  let lastSymbol = null, lastName = null, lastSide = null;
   for (let i = 1; i < lines.length; i++) {
     const cols = parseLine(lines[i]);
-    const status = cols[idx("Status")];
+    if (cols[idx("Symbol")]) { lastSymbol = cols[idx("Symbol")]; lastName = cols[idx("Name")]; lastSide = cols[idx("Side")]; }
     const fillQty = Number(cols[idx("Fill Qty")]);
-    if (status !== "Filled" || !fillQty) continue;
+    if (!fillQty) continue;
+    const symbol = cols[idx("Symbol")] || lastSymbol;
     out.push({
-      side: cols[idx("Side")],
-      ticker: cols[idx("Symbol")] + ".KL",
-      name: cols[idx("Name")],
+      side: cols[idx("Side")] || lastSide,
+      ticker: symbol + ".KL",
+      name: cols[idx("Name")] || lastName,
       qty: fillQty,
       price: Number(cols[idx("Fill Price")]),
       date: (cols[idx("Fill Time")] || "").slice(0, 11).trim(),
       // stable id so re-importing the same export never double-logs a fill
-      id: [cols[idx("Symbol")], cols[idx("Fill Time")], fillQty, cols[idx("Fill Price")]].join("|")
+      id: [symbol, cols[idx("Fill Time")], fillQty, cols[idx("Fill Price")]].join("|")
     });
   }
   return out;
