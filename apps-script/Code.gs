@@ -114,6 +114,20 @@ function doGet(e) {
     return json_({ cashAvailable: Number(budget.getRange("B1").getValue()) || 0 });
   }
 
+  // Logging via GET, not just POST: Apps Script Web Apps 302-redirect every
+  // request internally, and some mobile browsers follow that redirect by
+  // converting POST to GET and dropping the body (and the secret in it) —
+  // which the GET-only endpoints never hit. This is the reliable path; the
+  // POST version below is kept for anything that still uses it.
+  if (action === "log") {
+    const tx = ss.getSheetByName(SHEET_NAMES.TRANSACTIONS);
+    const qty = Number(e.parameter.qty);
+    const price = Number(e.parameter.price);
+    const amount = qty * price;
+    tx.appendRow([e.parameter.date, e.parameter.side, e.parameter.ticker, qty, price, amount, e.parameter.source || "app"]);
+    return json_({ ok: true });
+  }
+
   // Last trade date per ticker (any side) — lets the app warn "you just
   // traded this Xd ago" instead of nudging you into a fresh buy every time
   // a mechanical signal flips. Scans the whole log; fine at personal scale.

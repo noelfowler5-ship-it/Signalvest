@@ -504,11 +504,12 @@ async function sheetPost(payload) {
       ? "no sheet connected in this tab (but a URL IS saved in this browser — reload the page, don't just switch tabs)"
       : "no sheet connected (nothing saved in this browser yet — go to Settings and tap Save)");
   }
-  const r = await fetch(state.sheetUrl, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" }, // avoids a CORS preflight against Apps Script
-    body: JSON.stringify({ ...payload, secret: state.sheetSecret })
-  });
+  // GET, not POST: Apps Script Web Apps 302-redirect internally, and some
+  // mobile browsers follow that by converting POST to GET and dropping the
+  // body (and the secret in it), landing on doGet unauthenticated. GET-only
+  // calls never hit that — same reason sheetGet() above already works.
+  const params = new URLSearchParams({ ...payload, secret: state.sheetSecret });
+  const r = await fetch(`${state.sheetUrl}?${params.toString()}`);
   const text = await r.text();
   let data;
   try { data = JSON.parse(text); }
