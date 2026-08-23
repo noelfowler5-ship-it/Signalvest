@@ -85,8 +85,27 @@ function setupSheet() {
  */
 function setSharedSecret() {
   const SECRET = "REPLACE_WITH_A_LONG_RANDOM_STRING";
+  // Guard: re-pasting this file resets SECRET to the placeholder above, and
+  // running it unedited would silently overwrite a working secret with it.
+  if (SECRET === "REPLACE_WITH_A_LONG_RANDOM_STRING") {
+    throw new Error("Edit the SECRET value on the line above to your own text first, then run this again.");
+  }
   PropertiesService.getScriptProperties().setProperty("SHARED_SECRET", SECRET);
   SpreadsheetApp.getActiveSpreadsheet().toast("Secret saved. Use this same string in the app's Settings tab and as your GitHub SHEET_SECRET.");
+}
+
+/**
+ * Run this to see the secret currently stored, so you can compare it against
+ * what the app has. View > Logs (or the Execution log) shows the output.
+ */
+function showSharedSecret() {
+  const s = PropertiesService.getScriptProperties().getProperty("SHARED_SECRET");
+  if (!s) {
+    Logger.log("No secret is set. Edit SECRET in setSharedSecret and run that function once.");
+  } else {
+    Logger.log("Current secret is: [" + s + "]  (" + s.length + " characters)");
+    Logger.log("Paste exactly what is between the square brackets into the app's Settings tab.");
+  }
 }
 
 function checkSecret_(secret) {

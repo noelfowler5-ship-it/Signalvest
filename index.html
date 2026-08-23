@@ -148,13 +148,17 @@
         Paste the Apps Script Web App URL and shared secret from your deployment (see README). Stored only in this browser.
       </div>
       <label>Web App URL</label>
-      <input id="sheetUrl" style="width:100%" placeholder="https://script.google.com/macros/s/.../exec">
+      <input id="sheetUrl" style="width:100%" placeholder="https://script.google.com/macros/s/.../exec"
+             autocapitalize="none" autocorrect="off" spellcheck="false">
       <label style="margin-top:8px">Shared secret</label>
-      <input id="sheetSecret" style="width:100%" type="password">
+      <input id="sheetSecret" style="width:100%" type="password"
+             autocapitalize="none" autocorrect="off" spellcheck="false">
       <div class="row" style="margin-top:10px">
         <button class="btn secondary" id="saveSheet">Save</button>
+        <button class="btn secondary" id="testSheet">Test connection</button>
         <span id="sheetStatus" class="muted" style="font-size:12px"></span>
       </div>
+      <div id="sheetTestResult" style="font-size:12px;margin-top:8px"></div>
       <div id="sheetDebug" class="muted" style="font-size:11px;margin-top:8px"></div>
     </div>
   </section>
@@ -482,6 +486,38 @@ document.getElementById("saveSheet").addEventListener("click", () => {
   loadHoldings();
   loadRecentTrades();
 });
+
+// Explicit pass/fail check. Without this the only feedback was indirect —
+// and an "unauthorized" reply could be mistaken for an empty Sheet.
+document.getElementById("testSheet").addEventListener("click", async () => {
+  const out = document.getElementById("sheetTestResult");
+  const url = document.getElementById("sheetUrl").value.trim();
+  const secret = document.getElementById("sheetSecret").value.trim();
+  if (!url || !secret) { out.innerHTML = '<span style="color:var(--avoid)">Fill in both the URL and the secret first.</span>'; return; }
+  out.innerHTML = '<span class="spinner"></span> testing...';
+  try {
+    const r = await fetch(`${url}?secret=${encodeURIComponent(secret)}&action=holdings`);
+    const text = await r.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch {
+      out.innerHTML = `<span style="color:var(--avoid)">✕ The URL didn't return data. It may be wrong, or the deployment isn't set to "Anyone" access.</span>`;
+      return;
+    }
+    if (data.error === "unauthorized") {
+      out.innerHTML = `<span style="color:var(--avoid)">✕ Connected to the Sheet, but the secret was rejected.</span>` +
+        `<div class="muted" style="margin-top:4px">The secret here (${secret.length} characters) does not match SHARED_SECRET in your Apps Script. ` +
+        `Open Apps Script → setSharedSecret, set the same text there, run it once, then paste that exact text here and Save.</div>`;
+      return;
+    }
+    if (data.error) { out.innerHTML = `<span style="color:var(--avoid)">✕ Sheet replied: ${data.error}</span>`; return; }
+    const n = (data.holdings || []).length;
+    out.innerHTML = `<span style="color:var(--buy)">✓ Working — Sheet reached and secret accepted.</span>` +
+      `<div class="muted" style="margin-top:4px">${n} open position(s) currently logged.</div>`;
+  } catch (e) {
+    out.innerHTML = `<span style="color:var(--avoid)">✕ Couldn't reach the URL at all: ${e.message}</span>`;
+  }
+});
 renderSettings();
 
 /* ---------- sheet sync ---------- */
@@ -494,8 +530,16 @@ async function sheetGet(action) {
   }
   const url = `${state.sheetUrl}?secret=${encodeURIComponent(state.sheetSecret)}&action=${action}`;
   const r = await fetch(url);
-  if (!r.ok) throw new Error("sheet request failed");
-  return await r.json();
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error(`Sheet returned non-JSON (HTTP ${r.status}): ${text.slice(0, 120)}`); }
+  // Must check this: a rejected request still returns HTTP 200 with an error
+  // payload, and callers that only look for their own field (e.g. holdings)
+  // would otherwise read "unauthorized" as "no data yet".
+  if (data.error) throw new Error(`Sheet error: ${data.error}`);
+  if (!r.ok) throw new Error(`Sheet request failed (HTTP ${r.status})`);
+  return data;
 }
 async function sheetPost(payload) {
   if (!state.sheetUrl) {
@@ -535,7 +579,9 @@ async function loadHoldings() {
     ).join("");
     renderStopLevels(data.holdings);
   } catch (e) {
-    box.textContent = "Could not reach your Sheet. Check the URL/secret in Settings.";
+    box.textContent = e.message.includes("unauthorized")
+      ? "Sheet rejected the secret — the secret here doesn't match your Apps Script. Use Test connection in Settings."
+      : "Could not reach your Sheet: " + e.message;
   }
 }
 
