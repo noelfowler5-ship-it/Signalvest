@@ -678,6 +678,13 @@ document.getElementById("logTrade").addEventListener("click", async () => {
     price: Number(document.getElementById("tPrice").value)
   };
   if (!payload.ticker || !payload.qty || !payload.price) { status.textContent = "Fill in ticker, qty and price."; return; }
+  if (!payload.ticker.endsWith(".KL")) payload.ticker += ".KL"; // Bursa tickers always need this suffix
+  const amount = (payload.qty * payload.price).toFixed(2);
+  const confirmed = confirm(
+    `Log this trade?\n\n${payload.side} ${payload.qty} shares of ${payload.ticker}\n` +
+    `@ RM${payload.price} = RM${amount} total\n\nCheck the ticker and price carefully before confirming.`
+  );
+  if (!confirmed) { status.textContent = "Cancelled — nothing was logged."; return; }
   status.innerHTML = '<span class="spinner"></span> saving...';
   try {
     await sheetPost(payload);
