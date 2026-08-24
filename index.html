@@ -97,8 +97,12 @@
 
     <div class="panel">
       <div style="font-weight:600;margin-bottom:8px">Log a trade</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">
+        Buy/Sell only — for dividends, deposits or withdrawals, add a row directly in the Sheet's
+        Transactions tab (Type column). The ledger and journal already understand those row types.
+      </div>
       <div class="row">
-        <div><label>Side</label><select id="tSide"><option>Buy</option><option>Sell</option><option>Dividend</option><option>Deposit</option><option>Withdrawal</option></select></div>
+        <div><label>Side</label><select id="tSide"><option>Buy</option><option>Sell</option></select></div>
         <div><label>Ticker</label><input id="tTicker" placeholder="0036.KL"></div>
         <div><label>Qty (shares)</label><input id="tQty" type="number" step="100"></div>
         <div><label>Price (RM)</label><input id="tPrice" type="number" step="0.001"></div>
