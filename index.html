@@ -126,8 +126,10 @@
       <label>Cash available to invest this cycle (RM)</label>
       <input id="cashInput" type="number" step="0.01" style="width:160px">
       <div class="muted" style="font-size:12px;margin-top:6px">
-        Stored only in this browser (localStorage) — never sent anywhere except your own Google Sheet, if connected.
+        Update it here only — if your Sheet is connected, it's pushed there automatically so the
+        scheduled Telegram alerts stay in sync too. No need to edit the Sheet's Budget tab by hand.
       </div>
+      <div id="cashSyncStatus" class="muted" style="font-size:12px;margin-top:4px"></div>
     </div>
 
     <div class="panel">
@@ -477,10 +479,21 @@ function updateSheetDebug() {
     `(URL ${storedUrlVal ? storedUrlVal.length + " chars" : "empty"}, secret ${storedSecretVal ? "set" : "empty"})`;
 }
 
-document.getElementById("cashInput").addEventListener("change", e => {
+document.getElementById("cashInput").addEventListener("change", async e => {
   state.cash = Number(e.target.value) || 0;
   save(LS.cash, state.cash);
   renderSettings();
+  // Push to the Sheet too, so the GitHub Actions budget-fit check (which
+  // only reads the Sheet, not this browser's localStorage) stays in sync —
+  // this is the one place you update cash, not two.
+  if (state.sheetUrl) {
+    try {
+      await sheetPost({ action: "setBudget", cash: state.cash });
+      document.getElementById("cashSyncStatus").textContent = "Synced to Sheet.";
+    } catch (err) {
+      document.getElementById("cashSyncStatus").textContent = "Saved locally, but Sheet sync failed: " + err.message;
+    }
+  }
 });
 document.getElementById("pinAdd").addEventListener("click", () => {
   const v = document.getElementById("pinInput").value.trim();
@@ -489,7 +502,7 @@ document.getElementById("pinAdd").addEventListener("click", () => {
   document.getElementById("pinInput").value = "";
   renderSettings();
 });
-document.getElementById("saveSheet").addEventListener("click", () => {
+document.getElementById("saveSheet").addEventListener("click", async () => {
   state.sheetUrl = document.getElementById("sheetUrl").value.trim();
   state.sheetSecret = document.getElementById("sheetSecret").value.trim();
   save(LS.sheetUrl, state.sheetUrl);
@@ -497,6 +510,11 @@ document.getElementById("saveSheet").addEventListener("click", () => {
   document.getElementById("sheetStatus").textContent = "Saved.";
   loadHoldings();
   loadRecentTrades();
+  // Push the app's current cash figure right away, so connecting doesn't
+  // leave the Sheet holding whatever was last typed there by hand.
+  if (state.sheetUrl && state.cash) {
+    try { await sheetPost({ action: "setBudget", cash: state.cash }); } catch (err) { /* non-fatal — next cash edit will retry */ }
+  }
 });
 
 // Explicit pass/fail check. Without this the only feedback was indirect —

@@ -136,6 +136,17 @@ function doGet(e) {
     return json_({ cashAvailable: Number(budget.getRange("B1").getValue()) || 0 });
   }
 
+  // Lets the app's own Settings tab be the single place you update cash —
+  // this writes it into the Sheet too, so the GitHub Actions budget-fit
+  // check (which only reads the Sheet) stays in sync automatically.
+  if (action === "setBudget") {
+    const cash = Number(e.parameter.cash);
+    if (isNaN(cash)) return json_({ error: "invalid cash value" });
+    const budget = ss.getSheetByName(SHEET_NAMES.BUDGET);
+    budget.getRange("B1").setValue(cash);
+    return json_({ ok: true, cashAvailable: cash });
+  }
+
   // Logging via GET, not just POST: Apps Script Web Apps 302-redirect every
   // request internally, and some mobile browsers follow that redirect by
   // converting POST to GET and dropping the body (and the secret in it) —
