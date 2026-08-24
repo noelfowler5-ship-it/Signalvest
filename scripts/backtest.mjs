@@ -18,7 +18,7 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { runBacktest, summarizeBacktest, splitInOutSample, smaRsiSignals, breakoutVolumeSignals } from "../lib/backtest.mjs";
+import { runBacktest, summarizeBacktest, splitInOutSample, smaRsiSignals, breakoutVolumeSignals } from "../lib/backtest.js";
 
 const STRATEGIES = { smaRsi: smaRsiSignals, breakoutVolume: breakoutVolumeSignals };
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { reconcileHoldings } from "../lib/reconcile.mjs";
+import { reconcileHoldings } from "../lib/reconcile.js";
 
 test("matching quantities and cost basis report ok", () => {
   const r = reconcileHoldings({

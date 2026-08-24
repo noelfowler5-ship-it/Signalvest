@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { reduceLedger, normalizeTx } from "../lib/ledger.mjs";
+import { reduceLedger, normalizeTx } from "../lib/ledger.js";
 
 test("simple buy then full sell: qty zeroed, realized P/L correct", () => {
   const { holdings, realizedTrades, realizedPLTotal } = reduceLedger([

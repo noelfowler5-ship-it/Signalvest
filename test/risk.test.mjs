@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computePositionSize, computePortfolioHeat, evaluateLossLimits, computeDrawdown, consecutiveStreak } from "../lib/risk.mjs";
+import { computePositionSize, computePortfolioHeat, evaluateLossLimits, computeDrawdown, consecutiveStreak } from "../lib/risk.js";
 
 test("position sizing matches the spec's worked example exactly", () => {
   // Portfolio RM10,000, 1% risk, entry RM10.00, stop RM9.50 -> 200 shares

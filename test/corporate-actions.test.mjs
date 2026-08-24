@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyCorporateActions } from "../lib/corporate-actions.mjs";
+import { applyCorporateActions } from "../lib/corporate-actions.js";
 
 test("2-for-1 split doubles qty and halves avg cost, cost basis unchanged", () => {
   const r = applyCorporateActions(

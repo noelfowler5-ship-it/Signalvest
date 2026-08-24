@@ -19,11 +19,11 @@
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
-import { reduceLedger } from "../lib/ledger.mjs";
-import { computePositionSize, computePortfolioHeat, evaluateLossLimits } from "../lib/risk.mjs";
-import { scoreCandidate, computeEntryStopTarget, buildDecisionCard } from "../lib/decision.mjs";
-import { classifyRegime } from "../lib/regime.mjs";
-import { cloneStrategy, DEFAULT_STRATEGY } from "../lib/strategy.mjs";
+import { reduceLedger } from "../lib/ledger.js";
+import { computePositionSize, computePortfolioHeat, evaluateLossLimits } from "../lib/risk.js";
+import { scoreCandidate, computeEntryStopTarget, buildDecisionCard } from "../lib/decision.js";
+import { classifyRegime } from "../lib/regime.js";
+import { cloneStrategy, DEFAULT_STRATEGY } from "../lib/strategy.js";
 
 const {
   TELEGRAM_BOT_TOKEN,

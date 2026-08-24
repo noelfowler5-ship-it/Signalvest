@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runBacktest, summarizeBacktest, splitInOutSample } from "../lib/backtest.mjs";
+import { runBacktest, summarizeBacktest, splitInOutSample } from "../lib/backtest.js";
 
 function bar(date, o, h, l, c, v = 100000) {
   return { date, open: o, high: h, low: l, close: c, volume: v };

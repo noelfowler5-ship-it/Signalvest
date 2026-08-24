@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scoreCandidate, computeEntryStopTarget, buildDecisionCard, classifyBucket } from "../lib/decision.mjs";
-import { DEFAULT_STRATEGY, maxPossibleScore } from "../lib/strategy.mjs";
+import { scoreCandidate, computeEntryStopTarget, buildDecisionCard, classifyBucket } from "../lib/decision.js";
+import { DEFAULT_STRATEGY, maxPossibleScore } from "../lib/strategy.js";
 
 test("scoreCandidate: bullish setup scores positively with matching reasons", () => {
   const hist = Array.from({ length: 25 }, (_, i) => ({ close: 3 + i * 0.01, high: 3.05 + i * 0.01, low: 2.95 + i * 0.01, volume: 100000 }));

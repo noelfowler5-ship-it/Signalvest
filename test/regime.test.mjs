@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyRegime } from "../lib/regime.mjs";
+import { classifyRegime } from "../lib/regime.js";
 
 test("not enough history returns NEUTRAL with an honest reason, never a guess", () => {
   const r = classifyRegime({ klciCloses: [1500, 1510, 1520] });

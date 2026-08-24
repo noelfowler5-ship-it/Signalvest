@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeBehaviorStats } from "../lib/journal.mjs";
+import { computeBehaviorStats } from "../lib/journal.js";
 
 test("empty trade list returns zeroed stats, not NaN/Infinity", () => {
   const s = computeBehaviorStats([]);

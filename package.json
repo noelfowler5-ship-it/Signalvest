@@ -1,0 +1,9 @@
+{
+  "name": "signalvest",
+  "private": true,
+  "type": "module",
+  "description": "No build step, no dependencies — this file exists only so Node treats lib/*.js as ES modules (matching the ES module <script> tags index.html uses to import them directly). scripts/*.mjs and test/*.test.mjs are unaffected; they already force ESM via their own .mjs extension.",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
