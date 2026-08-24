@@ -1,0 +1,24 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run lib/ unit tests
+        run: node --test test/*.test.mjs
+
+      - name: Syntax-check Apps Script
+        run: |
+          cp apps-script/Code.gs /tmp/Code_check.js
+          node --check /tmp/Code_check.js
