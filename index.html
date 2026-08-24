@@ -69,7 +69,7 @@
     </div>
     <div class="panel" id="resultsPanel" style="display:none">
       <table>
-        <thead><tr><th>Ticker</th><th>Price (RM)</th><th>Trend</th><th>RSI14</th><th>Signal</th><th>100-lot cost</th><th>Fits budget</th><th>Last traded</th></tr></thead>
+        <thead><tr><th>Ticker</th><th>Price (RM)</th><th>Trend</th><th>RSI14</th><th>Signal</th><th>100-lot cost</th><th>Fits budget</th><th>Last traded</th><th>Fundamentals</th></tr></thead>
         <tbody id="resultsBody"></tbody>
       </table>
     </div>
@@ -295,6 +295,36 @@ function classify(closes) {
   return { trend, rsi: r, signal, sma20: s20, sma50: s50 };
 }
 
+/* ---------- fundamentals (quality flags, not a "good to go" verdict) ----------
+ * Three plain yes/no facts, not a combined score: is the business actually
+ * profitable, does it pay a real dividend, is it growing. Only fetched for
+ * tickers actually shown (top candidates + holdings), not the whole universe. */
+async function fetchFundamentals(ticker) {
+  const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=financialData,defaultKeyStatistics,summaryDetail`;
+  const data = await fetchJSON(url);
+  const r = data?.quoteSummary?.result?.[0];
+  if (!r) return null;
+  const eps = r.defaultKeyStatistics?.trailingEps?.raw;
+  const divYield = r.summaryDetail?.dividendYield?.raw;
+  const earningsGrowth = r.financialData?.earningsGrowth?.raw;
+  return {
+    profitable: eps == null ? null : eps > 0,
+    dividendYield: divYield == null ? null : divYield, // fraction, e.g. 0.032 = 3.2%
+    earningsGrowing: earningsGrowth == null ? null : earningsGrowth > 0
+  };
+}
+
+function fundamentalsBadgesHtml(f) {
+  if (!f) return '<span class="muted">no data</span>';
+  const parts = [];
+  parts.push(f.profitable == null ? '<span class="muted">profit ?</span>'
+    : f.profitable ? "💰 Profitable" : '<span class="cooldown">⚠️ Not profitable</span>');
+  parts.push(f.dividendYield != null && f.dividendYield > 0
+    ? `📈 Div ${(f.dividendYield * 100).toFixed(1)}%` : '<span class="muted">No dividend</span>');
+  if (f.earningsGrowing === true) parts.push("📊 Growing");
+  return parts.join(" · ");
+}
+
 /* ---------- stop-loss / trailing-stop (ATR-based, Wilder's smoothing like RSI) ---------- */
 function atr14(highs, lows, closes) {
   const period = 14;
@@ -403,6 +433,8 @@ async function runScreener() {
         ? `<span class="cooldown">${days}d ago (${rt.side})</span>`
         : `<span class="muted">${days}d ago</span>`;
     }
+    let fundamentals = null;
+    try { fundamentals = await fetchFundamentals(r.code); } catch (e) { /* best-effort, leave as "no data" */ }
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${r.code}${r.isPinned ? ' <span class="muted">(held)</span>' : ""}<br><span class="muted">${r.name}</span></td>
@@ -412,7 +444,8 @@ async function runScreener() {
       <td><span class="pill ${r.signal}">${r.signal}</span></td>
       <td>RM ${r.lotCost.toFixed(2)}</td>
       <td>${r.fitsBudget ? "yes" : "no"}</td>
-      <td>${lastTradedHtml}</td>`;
+      <td>${lastTradedHtml}</td>
+      <td style="font-size:12px">${fundamentalsBadgesHtml(fundamentals)}</td>`;
     resultsBody.appendChild(tr);
   }
   status.textContent = `Top ${topCandidates.length} new candidate(s) shown (of ${buyCandidates.length} BUY signal(s) among ${universe.length} screened) + ${heldRows.length} held position(s). Not financial advice.`;
@@ -606,10 +639,13 @@ async function renderStopLevels(holdings) {
       const pill = pillClass ? `<span class="pill ${pillClass}">${pillLabel}</span>` : `<span class="muted">${pillLabel}</span>`;
       const trailNote = info.state === "trailing" || info.state === "near" || info.state === "breached"
         ? ` (trailing, was hard stop RM${info.hardStop.toFixed(3)})` : "";
+      let fundamentals = null;
+      try { fundamentals = await fetchFundamentals(h.ticker); } catch (e) { /* best-effort */ }
       lines.push(`
         <div style="padding:6px 0;border-bottom:1px solid var(--border)">
           <div>${h.ticker} — RM${info.currentPrice.toFixed(3)} ${pill}</div>
           <div class="muted" style="font-size:12px">avg cost RM${Number(h.avgCost).toFixed(3)} · stop RM${info.operative.toFixed(3)}${trailNote}</div>
+          <div style="font-size:12px;margin-top:2px">${fundamentalsBadgesHtml(fundamentals)}</div>
         </div>`);
     } catch (e) {
       lines.push(`<div>${h.ticker} — <span class="muted">could not fetch price</span></div>`);
