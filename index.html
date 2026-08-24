@@ -24,21 +24,36 @@
   input,select,textarea{background:#0b0d10;border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:14px}
   button.btn{background:var(--accent);color:#031225;border:none;padding:9px 16px;border-radius:8px;font-weight:600;cursor:pointer;font-size:14px}
   button.btn.secondary{background:transparent;border:1px solid var(--border);color:var(--text)}
+  button.btn.tiny{padding:5px 10px;font-size:12px;border-radius:6px}
   table{width:100%;border-collapse:collapse;font-size:13px}
   th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--border)}
   th{color:var(--muted);font-weight:600}
   .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
-  .pill.BUY{background:rgba(46,204,113,.15);color:var(--buy)}
-  .pill.HOLD{background:rgba(241,196,15,.15);color:var(--hold)}
+  .pill.BUY,.pill.READY{background:rgba(46,204,113,.15);color:var(--buy)}
+  .pill.HOLD,.pill.APPROACHING{background:rgba(241,196,15,.15);color:var(--hold)}
   .pill.AVOID{background:rgba(231,76,60,.15);color:var(--avoid)}
+  .pill.WATCH{background:rgba(139,147,161,.15);color:var(--muted)}
   .muted{color:var(--muted)}
   .cooldown{color:var(--avoid);font-weight:600}
   .warn{background:rgba(231,76,60,.12);border:1px solid rgba(231,76,60,.35);color:#ff8a80;padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}
+  .ok{background:rgba(46,204,113,.1);border:1px solid rgba(46,204,113,.3);color:var(--buy);padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}
+  .info{background:rgba(77,163,255,.1);border:1px solid rgba(77,163,255,.3);color:var(--accent);padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}
   .hidden{display:none}
   .tag{cursor:pointer;color:var(--accent);font-size:12px}
   footer{color:var(--muted);font-size:11px;text-align:center;padding:20px}
   .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px}
   @keyframes spin{to{transform:rotate(360deg)}}
+  .bar{background:#0b0d10;border:1px solid var(--border);border-radius:999px;height:8px;overflow:hidden;margin:4px 0}
+  .bar > div{height:100%;background:var(--accent)}
+  .bar.danger > div{background:var(--avoid)}
+  .bar.warnfill > div{background:var(--hold)}
+  .decisionCard{border-top:1px dashed var(--border);margin-top:8px;padding-top:8px;font-size:12px}
+  .decisionCard .why{color:var(--buy)}
+  .decisionCard .risk{color:#ffb37a}
+  details.more summary{cursor:pointer;color:var(--accent);font-size:12px;margin-top:8px}
+  .statgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;font-size:12px}
+  .statgrid .stat b{display:block;font-size:16px;color:var(--text)}
+  .clickable{cursor:pointer;text-decoration:underline;text-decoration-style:dotted}
 </style>
 </head>
 <body>
@@ -52,6 +67,7 @@
 <nav>
   <button data-tab="screener" class="active">Screener</button>
   <button data-tab="portfolio">Portfolio</button>
+  <button data-tab="risk">Risk</button>
   <button data-tab="settings">Settings</button>
 </nav>
 <main>
@@ -67,24 +83,46 @@
       </div>
       <div id="screenStatus" class="muted" style="font-size:12px;margin-top:8px"></div>
     </div>
+    <div id="regimeBox"></div>
     <div class="panel" id="resultsPanel" style="display:none">
       <table>
-        <thead><tr><th>Ticker</th><th>Price (RM)</th><th>Trend</th><th>RSI14</th><th>Signal</th><th>100-lot cost</th><th>Fits budget</th><th>Last traded</th><th>Fundamentals</th></tr></thead>
+        <thead><tr><th>Ticker</th><th>Price (RM)</th><th>Trend</th><th>RSI14</th><th>Signal</th><th>Bucket</th><th>100-lot cost</th><th>Fits budget</th><th>Last traded</th><th>Fundamentals</th></tr></thead>
         <tbody id="resultsBody"></tbody>
       </table>
     </div>
   </section>
 
   <section id="tab-portfolio" class="hidden">
+    <div id="limitBanner"></div>
+
     <div class="panel">
       <div style="font-weight:600;margin-bottom:8px">Log a trade</div>
       <div class="row">
-        <div><label>Side</label><select id="tSide"><option>Buy</option><option>Sell</option></select></div>
+        <div><label>Side</label><select id="tSide"><option>Buy</option><option>Sell</option><option>Dividend</option><option>Deposit</option><option>Withdrawal</option></select></div>
         <div><label>Ticker</label><input id="tTicker" placeholder="0036.KL"></div>
         <div><label>Qty (shares)</label><input id="tQty" type="number" step="100"></div>
         <div><label>Price (RM)</label><input id="tPrice" type="number" step="0.001"></div>
         <div><label>Date</label><input id="tDate" type="date"></div>
+        <div><label>Fee (RM, optional)</label><input id="tFee" type="number" step="0.01" style="width:100px"></div>
       </div>
+      <details class="more">
+        <summary>More detail (optional — thesis, setup, emotion)</summary>
+        <div class="row" style="margin-top:8px">
+          <div><label>Setup</label><input id="tSetup" placeholder="e.g. Breakout"></div>
+          <div><label>Emotion</label>
+            <select id="tEmotion">
+              <option value="">—</option>
+              <option>Neutral</option><option>Confidence</option><option>FOMO</option>
+              <option>Fear</option><option>Greed</option><option>Revenge</option><option>Boredom</option>
+            </select>
+          </div>
+          <div><label>Followed my rules?</label>
+            <select id="tRuleFollowed"><option value="">—</option><option value="true">Yes</option><option value="false">No</option></select>
+          </div>
+        </div>
+        <label style="margin-top:8px">Thesis — why this trade</label>
+        <textarea id="tThesis" style="width:100%" rows="2"></textarea>
+      </details>
       <div class="row" style="margin-top:10px">
         <button class="btn" id="logTrade">Log to Sheet</button>
         <span id="logStatus" class="muted" style="font-size:12px"></span>
@@ -102,6 +140,7 @@
         <button class="btn secondary" id="importCsv">Parse &amp; sync new trades</button>
         <span id="importStatus" class="muted" style="font-size:12px"></span>
       </div>
+      <div id="reconcileBox" style="margin-top:10px"></div>
     </div>
 
     <div class="panel">
@@ -117,6 +156,58 @@
         to matter. You still place any exit yourself with your broker.
       </div>
       <div id="stopBox" class="muted" style="font-size:13px">Connect your Sheet in Settings to see this.</div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:6px">Performance (realized trades)</div>
+      <div id="perfBox" class="muted" style="font-size:13px">Connect your Sheet in Settings to see this.</div>
+    </div>
+
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:6px">Corporate actions</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">
+        Splits, bonus issues and rights are manually logged here (no reliable free data source exists to
+        pull these automatically) — they adjust the qty/avg-cost <i>display</i> only, never your Transactions history.
+      </div>
+      <div class="row">
+        <div><label>Ticker</label><input id="caTicker" placeholder="0036.KL" style="width:110px"></div>
+        <div><label>Type</label>
+          <select id="caType">
+            <option value="Split">Split</option><option value="ReverseSplit">Reverse split</option>
+            <option value="Bonus">Bonus issue</option><option value="Rights">Rights issue</option>
+            <option value="Merger">Merger (manual review)</option><option value="TickerChange">Ticker change (manual review)</option>
+            <option value="Delisting">Delisting (manual review)</option>
+          </select>
+        </div>
+        <div><label>Ratio (new per old, e.g. 2-for-1 = 2)</label><input id="caRatio" type="number" step="0.0001" style="width:120px"></div>
+        <div><label>Rights price (RM, if Rights)</label><input id="caPrice" type="number" step="0.001" style="width:120px"></div>
+        <div><label>Date</label><input id="caDate" type="date"></div>
+      </div>
+      <label style="margin-top:8px">Notes</label>
+      <input id="caNotes" style="width:100%">
+      <div class="row" style="margin-top:10px">
+        <button class="btn secondary" id="caAdd">Log corporate action</button>
+        <span id="caStatus" class="muted" style="font-size:12px"></span>
+      </div>
+      <div id="caList" style="margin-top:10px;font-size:13px"></div>
+    </div>
+  </section>
+
+  <section id="tab-risk" class="hidden">
+    <div id="riskLimitBanner"></div>
+    <div class="panel">
+      <div class="row" style="justify-content:space-between">
+        <div style="font-weight:600">Portfolio heat</div>
+        <button class="btn secondary tiny" id="refreshRisk">Refresh</button>
+      </div>
+      <div class="muted" style="font-size:12px;margin:6px 0 10px">
+        How much of your total value would actually be lost if every stop hit right now — not your unrealized P/L, your genuine capital at risk.
+      </div>
+      <div id="heatBox" class="muted" style="font-size:13px">Connect your Sheet in Settings to see this.</div>
+    </div>
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:8px">Daily / weekly / monthly loss limits</div>
+      <div id="lossLimitBox" class="muted" style="font-size:13px">Connect your Sheet in Settings to see this.</div>
     </div>
   </section>
 
@@ -145,6 +236,34 @@
     </div>
 
     <div class="panel">
+      <div style="font-weight:600;margin-bottom:8px">Risk limits &amp; strategy weights</div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px">
+        Stored in your Sheet's Config tab (needs <code>migrateSchemaV2</code> run once in Apps Script — see README).
+        These drive the Risk tab's loss-limit checks and the screener's decision score.
+      </div>
+      <div class="row">
+        <div><label>Max risk per trade (%)</label><input id="cfgMaxRiskPct" type="number" step="0.1" style="width:90px"></div>
+        <div><label>Daily loss limit (RM)</label><input id="cfgDaily" type="number" step="1" style="width:100px"></div>
+        <div><label>Weekly loss limit (RM)</label><input id="cfgWeekly" type="number" step="1" style="width:100px"></div>
+        <div><label>Monthly loss limit (RM)</label><input id="cfgMonthly" type="number" step="1" style="width:100px"></div>
+      </div>
+      <div class="muted" style="font-size:12px;margin:10px 0 4px">Decision-score weights (higher = matters more; 0 disables a factor)</div>
+      <div class="row">
+        <div><label>Trend</label><input id="cfgTrend" type="number" step="1" style="width:70px"></div>
+        <div><label>Momentum</label><input id="cfgMomentum" type="number" step="1" style="width:70px"></div>
+        <div><label>Volume</label><input id="cfgVolume" type="number" step="1" style="width:70px"></div>
+        <div><label>Fundamentals</label><input id="cfgFundamentals" type="number" step="1" style="width:70px"></div>
+        <div><label>Market regime</label><input id="cfgRegime" type="number" step="1" style="width:70px"></div>
+        <div><label>Risk:reward</label><input id="cfgRR" type="number" step="1" style="width:70px"></div>
+        <div><label>Position sizing</label><input id="cfgSizing" type="number" step="1" style="width:70px"></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn secondary" id="saveConfig">Save</button>
+        <span id="configStatus" class="muted" style="font-size:12px"></span>
+      </div>
+    </div>
+
+    <div class="panel">
       <div style="font-weight:600;margin-bottom:8px">Google Sheet sync</div>
       <div class="muted" style="font-size:12px;margin-bottom:8px">
         Paste the Apps Script Web App URL and shared secret from your deployment (see README). Stored only in this browser.
@@ -163,13 +282,26 @@
       <div id="sheetTestResult" style="font-size:12px;margin-top:8px"></div>
       <div id="sheetDebug" class="muted" style="font-size:11px;margin-top:8px"></div>
     </div>
+
+    <div class="panel">
+      <div style="font-weight:600;margin-bottom:8px">System health</div>
+      <div id="healthBox" class="muted" style="font-size:12px">Connect your Sheet to see this.</div>
+    </div>
   </section>
 
 </main>
 <footer>Signalvest is informational only — not financial advice. Always confirm with your own broker before acting.</footer>
 
-<script>
+<script type="module">
 "use strict";
+
+import { reduceLedger } from "./lib/ledger.js";
+import { computePositionSize, computePortfolioHeat, evaluateLossLimits } from "./lib/risk.js";
+import { scoreCandidate, computeEntryStopTarget, buildDecisionCard, classifyBucket } from "./lib/decision.js";
+import { classifyRegime } from "./lib/regime.js";
+import { cloneStrategy, DEFAULT_STRATEGY, maxPossibleScore } from "./lib/strategy.js";
+import { reconcileHoldings } from "./lib/reconcile.js";
+import { computeBehaviorStats } from "./lib/journal.js";
 
 /* ---------- storage ---------- */
 const LS = {
@@ -188,7 +320,17 @@ let state = {
   sheetUrl: load(LS.sheetUrl, ""),
   sheetSecret: load(LS.sheetSecret, ""),
   loggedIds: load(LS.loggedIds, []),
-  recentTrades: {} // ticker -> {date, side}, fetched from Sheet each session, not persisted
+  recentTrades: {}, // ticker -> {date, side}, fetched from Sheet each session, not persisted
+  universe: [],
+  lastHoldings: [],
+  ledger: null,      // { holdings, realizedTrades, dividends, cashFlows } from reduceLedger()
+  configRaw: null,    // raw Config tab key/values, or null if not migrated/reachable
+  strategy: DEFAULT_STRATEGY,
+  riskLimits: { daily: 150, weekly: 300, monthly: 600, maxRiskPct: 1 },
+  lastHeat: null,
+  lastLossLimits: null,
+  lastRegime: null,
+  corporateActions: []
 };
 
 const TOP_CANDIDATES = 3; // you can only realistically act on 1-2 picks at RM800 budget; don't pretend otherwise
@@ -201,6 +343,7 @@ document.querySelectorAll("nav button").forEach(b => b.addEventListener("click",
   document.querySelectorAll("main > section").forEach(s => s.classList.add("hidden"));
   document.getElementById("tab-" + b.dataset.tab).classList.remove("hidden");
   if (b.dataset.tab === "settings") renderSettings(); // always show a fresh read, not a stale one from page load
+  if (b.dataset.tab === "risk") renderRiskTab();
 }));
 
 /* ---------- defensive price fetch (Yahoo blocks browser CORS; proxy fallback chain) ---------- */
@@ -347,7 +490,12 @@ function computeStopInfo(hist, avgCost) {
   return { atr, currentPrice, hardStop, chandelier, operative, state };
 }
 
-/* ---------- screener ---------- */
+function sectorFor(code) {
+  const u = state.universe.find(x => x.code.toUpperCase() === code.toUpperCase());
+  return u?.sector || "Unclassified";
+}
+
+/* ---------- screener + decision engine + market regime ---------- */
 async function runScreener() {
   const btn = document.getElementById("runScreen");
   const status = document.getElementById("screenStatus");
@@ -360,6 +508,7 @@ async function runScreener() {
   let universe;
   try {
     universe = await (await fetch("universe.json")).json();
+    state.universe = universe;
   } catch (e) {
     status.textContent = "Could not load universe.json";
     btn.disabled = false;
@@ -367,11 +516,11 @@ async function runScreener() {
   }
   const pinnedSet = new Set(state.pinned.map(t => t.toUpperCase()));
   for (const t of pinnedSet) {
-    if (!universe.find(u => u.code.toUpperCase() === t)) universe.push({ code: t, name: t });
+    if (!universe.find(u => u.code.toUpperCase() === t)) universe.push({ code: t, name: t, sector: "Unclassified" });
   }
 
   const cash = Number(state.cash) || 0;
-  let done = 0;
+  let done = 0, upCount = 0, classifiedCount = 0;
   const rows = [];
   for (const stock of universe) {
     status.textContent = `checking ${stock.code} (${++done}/${universe.length})...`;
@@ -381,6 +530,8 @@ async function runScreener() {
       const avgVol20 = hist.slice(-20).reduce((a, h) => a + h.volume, 0) / Math.min(20, hist.length);
       const cls = classify(closes);
       if (!cls) continue;
+      classifiedCount++;
+      if (cls.trend === "up") upCount++;
       const price = closes[closes.length - 1];
       const lotCost = price * 100;
       const isPinned = pinnedSet.has(stock.code.toUpperCase());
@@ -389,12 +540,22 @@ async function runScreener() {
       if (!isPinned && !liquid) continue; // skip illiquid names unless you're already tracking them
       if (!isPinned && !fitsBudget) continue; // pure screener: only surface what you could actually buy a lot of
       const trendStrength = (cls.sma20 - cls.sma50) / cls.sma50; // proxy for conviction, not a quality judgement
-      rows.push({ ...stock, price, lotCost, fitsBudget, isPinned, trendStrength, ...cls });
+      rows.push({ ...stock, price, lotCost, fitsBudget, isPinned, liquid, trendStrength, hist, avgVol20, ...cls });
     } catch (e) {
       // one bad ticker shouldn't kill the run
       continue;
     }
   }
+
+  // Market regime — real KLCI history + this run's breadth. Not a prediction.
+  try {
+    const klciHist = await fetchHistory("^KLSE");
+    const breadthPct = classifiedCount > 0 ? (upCount / classifiedCount) * 100 : null;
+    state.lastRegime = classifyRegime({ klciCloses: klciHist.map(h => h.close), breadthPct });
+  } catch (e) {
+    state.lastRegime = null;
+  }
+  renderRegimeBox();
 
   // Held positions: always show, you need to monitor what you actually own.
   const heldRows = rows.filter(r => r.isPinned);
@@ -407,6 +568,9 @@ async function runScreener() {
   const shown = [...heldRows, ...topCandidates];
 
   const now = Date.now();
+  const investedCapital = state.lastHoldings.reduce((s, h) => s + (Number(h.qty) || 0) * (Number(h.avgCost) || 0), 0);
+  const portfolioValue = cash + investedCapital;
+
   for (const r of shown) {
     const rt = state.recentTrades[r.code.toUpperCase()];
     let lastTradedHtml = '<span class="muted">—</span>';
@@ -416,23 +580,103 @@ async function runScreener() {
         ? `<span class="cooldown">${days}d ago (${rt.side})</span>`
         : `<span class="muted">${days}d ago</span>`;
     }
+
+    let card = null;
+    if (!r.isPinned && r.signal === "BUY") {
+      const base = scoreCandidate({
+        hist: r.hist, cls: r, avgVol20: r.avgVol20,
+        regime: state.lastRegime ? state.lastRegime.regime : "NEUTRAL",
+        fundamentals: null, // never fabricated — you verify this yourself via the link below
+        strategy: state.strategy
+      });
+      const ets = computeEntryStopTarget({ currentPrice: r.price, highs: r.hist.map(h => h.high), lows: r.hist.map(h => h.low), closes: r.hist.map(h => h.close) });
+      const sizing = ets ? computePositionSize({ portfolioValue, maxRiskPct: state.riskLimits.maxRiskPct, entry: r.price, stop: ets.stop, cash, target: ets.target }) : null;
+      if (ets) card = buildDecisionCard({ ticker: r.code, name: r.name, currentPrice: r.price, base, entryStopTarget: ets, positionSizing: sizing, strategy: state.strategy });
+    }
+    const maxScore = maxPossibleScore(state.strategy.weights);
+    const bucket = classifyBucket({ score: card ? card.score : 0, maxScore, signal: r.signal, fitsBudget: r.fitsBudget, liquid: r.liquid });
+
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${r.code}${r.isPinned ? ' <span class="muted">(held)</span>' : ""}<br><span class="muted">${r.name}</span></td>
+      <td class="${card ? "clickable" : ""}" data-role="tickerCell">${r.code}${r.isPinned ? ' <span class="muted">(held)</span>' : ""}<br><span class="muted">${r.name}</span></td>
       <td>${r.price.toFixed(3)}</td>
       <td>${r.trend}</td>
       <td>${r.rsi.toFixed(1)}</td>
       <td><span class="pill ${r.signal}">${r.signal}</span></td>
+      <td><span class="pill ${bucket}">${bucket}</span></td>
       <td>RM ${r.lotCost.toFixed(2)}</td>
       <td>${r.fitsBudget ? "yes" : "no"}</td>
       <td>${lastTradedHtml}</td>
       <td style="font-size:12px">${fundamentalsLinkHtml(r.code)}</td>`;
     resultsBody.appendChild(tr);
+
+    if (card) {
+      const detailRow = document.createElement("tr");
+      detailRow.className = "hidden";
+      detailRow.innerHTML = `<td colspan="10">${decisionCardHtml(card)}</td>`;
+      resultsBody.appendChild(detailRow);
+      tr.querySelector('[data-role="tickerCell"]').addEventListener("click", () => {
+        detailRow.classList.toggle("hidden");
+      });
+      detailRow.querySelectorAll("[data-decision]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const decision = btn.dataset.decision;
+          btn.disabled = true;
+          try {
+            await sheetPost({ action: "logDecision", ticker: card.ticker, decision, score: `${card.score.toFixed(0)}/${card.maxScore.toFixed(0)}` });
+            btn.textContent = decision + " ✓";
+            if (decision === "Watch" && !state.pinned.includes(card.ticker)) {
+              state.pinned.push(card.ticker); save(LS.pinned, state.pinned);
+            }
+            if (decision === "Approve") {
+              document.querySelector('nav button[data-tab="portfolio"]').click();
+              document.getElementById("tTicker").value = card.ticker;
+              document.getElementById("tPrice").value = r.price;
+            }
+          } catch (e) {
+            btn.textContent = "failed: " + e.message;
+          }
+        });
+      });
+    }
   }
   status.textContent = `Top ${topCandidates.length} new candidate(s) shown (of ${buyCandidates.length} BUY signal(s) among ${universe.length} screened) + ${heldRows.length} held position(s). Not financial advice.`;
   btn.disabled = false;
 }
 document.getElementById("runScreen").addEventListener("click", runScreener);
+
+function decisionCardHtml(card) {
+  const positives = card.positives.map(p => `<div class="why">✓ ${p}</div>`).join("");
+  const risks = card.risks.map(r => `<div class="risk">⚠ ${r}</div>`).join("");
+  const sizingLine = card.positionSizing && card.positionSizing.valid
+    ? `Max position: ${card.positionSizing.maxShares} shares · Portfolio risk: ${card.positionSizing.portfolioRiskPct != null ? card.positionSizing.portfolioRiskPct.toFixed(1) + "%" : "—"}`
+    : "Set your cash in Settings to see a sized position.";
+  return `
+    <div class="decisionCard">
+      <div><b>${card.ticker}</b> — Score ${card.score.toFixed(0)}/${card.maxScore.toFixed(0)} · Strategy v${card.strategyVersion}</div>
+      <div style="margin:6px 0">
+        Entry RM${card.entry[0].toFixed(3)}–${card.entry[1].toFixed(3)} ·
+        Stop RM${card.stop.toFixed(3)} · Target RM${card.target.toFixed(3)} · R:R ${card.rr.toFixed(1)}
+      </div>
+      <div class="muted" style="margin-bottom:6px">${sizingLine}</div>
+      ${positives}${risks}
+      <div class="muted" style="margin-top:6px">Invalidation: ${card.invalidation}</div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn tiny" data-decision="Approve">Approve</button>
+        <button class="btn secondary tiny" data-decision="Watch">Watch</button>
+        <button class="btn secondary tiny" data-decision="Reject">Reject</button>
+      </div>
+      <div class="muted" style="margin-top:6px;font-size:11px">Approve only records your decision here — it never places an order. You still execute manually with your broker.</div>
+    </div>`;
+}
+
+function renderRegimeBox() {
+  const box = document.getElementById("regimeBox");
+  const r = state.lastRegime;
+  if (!r) { box.innerHTML = ""; return; }
+  const cls = r.regime === "RISK_ON" ? "ok" : r.regime === "RISK_OFF" ? "warn" : "info";
+  box.innerHTML = `<div class="${cls}"><b>Market regime: ${r.regime.replace("_", "-")}</b><br>${r.reasons.join("<br>")}<br><span class="muted">${r.disclaimer}</span></div>`;
+}
 
 /* ---------- settings ---------- */
 function renderSettings() {
@@ -441,6 +685,7 @@ function renderSettings() {
   document.getElementById("sheetSecret").value = state.sheetSecret || "";
   document.getElementById("cashHeader").textContent = state.cash ? `Budget: RM ${Number(state.cash).toFixed(2)}` : "";
   updateSheetDebug();
+  updateHealthBox();
   const pinList = document.getElementById("pinList");
   pinList.innerHTML = "";
   state.pinned.forEach(t => {
@@ -457,6 +702,19 @@ function renderSettings() {
     });
     pinList.appendChild(span);
   });
+
+  const w = state.strategy.weights;
+  document.getElementById("cfgMaxRiskPct").value = state.riskLimits.maxRiskPct;
+  document.getElementById("cfgDaily").value = state.riskLimits.daily;
+  document.getElementById("cfgWeekly").value = state.riskLimits.weekly;
+  document.getElementById("cfgMonthly").value = state.riskLimits.monthly;
+  document.getElementById("cfgTrend").value = w.trend;
+  document.getElementById("cfgMomentum").value = w.momentum;
+  document.getElementById("cfgVolume").value = w.volume;
+  document.getElementById("cfgFundamentals").value = w.fundamentals;
+  document.getElementById("cfgRegime").value = w.marketRegime;
+  document.getElementById("cfgRR").value = w.riskReward;
+  document.getElementById("cfgSizing").value = w.positionSizing;
 }
 
 // Reads localStorage directly (bypassing the in-memory `state` object) so we
@@ -477,6 +735,20 @@ function updateSheetDebug() {
     `(URL ${state.sheetUrl ? state.sheetUrl.length + " chars" : "empty"}, secret ${state.sheetSecret ? "set" : "empty"})<br>` +
     `Saved in this browser: <b>${storeOk ? "yes" : "NO"}</b> ` +
     `(URL ${storedUrlVal ? storedUrlVal.length + " chars" : "empty"}, secret ${storedSecretVal ? "set" : "empty"})`;
+}
+
+function updateHealthBox() {
+  const el = document.getElementById("healthBox");
+  if (!el) return;
+  const migrated = state.configRaw != null;
+  const lines = [
+    `Sheet connected: <b>${state.sheetUrl ? "yes" : "no"}</b>`,
+    `Schema V2 (risk/journal/corporate actions) migrated: <b>${migrated ? "yes" : "no — run migrateSchemaV2 in Apps Script"}</b>`,
+    `Holdings loaded: <b>${state.lastHoldings.length}</b> position(s)`,
+    `Transactions loaded: <b>${state.ledger ? state.ledger.realizedTrades.length + state.ledger.holdings.length : 0}</b> realized/open`,
+    `Last checked: ${new Date().toLocaleTimeString()}`
+  ];
+  el.innerHTML = lines.join("<br>");
 }
 
 document.getElementById("cashInput").addEventListener("change", async e => {
@@ -510,11 +782,39 @@ document.getElementById("saveSheet").addEventListener("click", async () => {
   document.getElementById("sheetStatus").textContent = "Saved.";
   loadHoldings();
   loadRecentTrades();
+  loadConfigAndLedger();
+  loadCorporateActions();
   // Push the app's current cash figure right away, so connecting doesn't
   // leave the Sheet holding whatever was last typed there by hand.
   if (state.sheetUrl && state.cash) {
     try { await sheetPost({ action: "setBudget", cash: state.cash }); } catch (err) { /* non-fatal — next cash edit will retry */ }
   }
+});
+
+document.getElementById("saveConfig").addEventListener("click", async () => {
+  const status = document.getElementById("configStatus");
+  if (!state.sheetUrl) { status.textContent = "Connect your Sheet first."; return; }
+  const updates = {
+    maxRiskPct: document.getElementById("cfgMaxRiskPct").value,
+    dailyLossLimit: document.getElementById("cfgDaily").value,
+    weeklyLossLimit: document.getElementById("cfgWeekly").value,
+    monthlyLossLimit: document.getElementById("cfgMonthly").value,
+    trendWeight: document.getElementById("cfgTrend").value,
+    momentumWeight: document.getElementById("cfgMomentum").value,
+    volumeWeight: document.getElementById("cfgVolume").value,
+    fundamentalsWeight: document.getElementById("cfgFundamentals").value,
+    marketRegimeWeight: document.getElementById("cfgRegime").value,
+    riskRewardWeight: document.getElementById("cfgRR").value,
+    positionSizingWeight: document.getElementById("cfgSizing").value
+  };
+  status.innerHTML = '<span class="spinner"></span> saving...';
+  let ok = 0, failed = null;
+  for (const [key, value] of Object.entries(updates)) {
+    try { await sheetPost({ action: "setConfig", key, value }); ok++; }
+    catch (e) { failed = e.message; }
+  }
+  status.textContent = failed ? `Saved ${ok}/${Object.keys(updates).length} — last error: ${failed}` : `Saved all ${ok} settings.`;
+  loadConfigAndLedger();
 });
 
 // Explicit pass/fail check. Without this the only feedback was indirect —
@@ -551,14 +851,15 @@ document.getElementById("testSheet").addEventListener("click", async () => {
 renderSettings();
 
 /* ---------- sheet sync ---------- */
-async function sheetGet(action) {
+async function sheetGet(action, extraParams) {
   if (!state.sheetUrl) {
     const storedHasUrl = !!localStorage.getItem(LS.sheetUrl);
     throw new Error(storedHasUrl
       ? "no sheet connected in this tab (but a URL IS saved in this browser — reload the page, don't just switch tabs)"
       : "no sheet connected (nothing saved in this browser yet — go to Settings and tap Save)");
   }
-  const url = `${state.sheetUrl}?secret=${encodeURIComponent(state.sheetSecret)}&action=${action}`;
+  const params = new URLSearchParams({ secret: state.sheetSecret, action, ...(extraParams || {}) });
+  const url = `${state.sheetUrl}?${params.toString()}`;
   const r = await fetch(url);
   const text = await r.text();
   let data;
@@ -599,7 +900,8 @@ async function loadHoldings() {
   box.innerHTML = '<span class="spinner"></span> loading...';
   try {
     const data = await sheetGet("holdings");
-    if (!data.holdings || !data.holdings.length) { box.textContent = "No open positions logged yet."; return; }
+    state.lastHoldings = data.holdings || [];
+    if (!data.holdings || !data.holdings.length) { box.textContent = "No open positions logged yet."; renderStopLevels([]); return; }
     // pin held tickers automatically so the screener always shows them
     data.holdings.forEach(h => { if (!state.pinned.includes(h.ticker)) state.pinned.push(h.ticker); });
     save(LS.pinned, state.pinned);
@@ -624,13 +926,24 @@ const STOP_PILL = {
 
 async function renderStopLevels(holdings) {
   const box = document.getElementById("stopBox");
-  if (!holdings || !holdings.length) { box.textContent = "No open positions to protect."; return; }
+  if (!holdings || !holdings.length) {
+    box.textContent = "No open positions to protect.";
+    state.lastHeat = computePortfolioHeat({ holdings: [], cash: Number(state.cash) || 0 });
+    renderRiskTab();
+    return;
+  }
   box.innerHTML = '<span class="spinner"></span> computing stop levels...';
   const lines = [];
+  const heatHoldings = [];
   for (const h of holdings) {
     try {
       const hist = await fetchHistory(h.ticker);
       const info = computeStopInfo(hist, Number(h.avgCost));
+      heatHoldings.push({
+        ticker: h.ticker, qty: Number(h.qty), avgCost: Number(h.avgCost),
+        currentPrice: info ? info.currentPrice : Number(h.avgCost),
+        stopPrice: info ? info.operative : null, sector: sectorFor(h.ticker)
+      });
       if (!info) { lines.push(`<div>${h.ticker} — <span class="muted">not enough price history yet</span></div>`); continue; }
       const [pillClass, pillLabel] = STOP_PILL[info.state];
       const pill = pillClass ? `<span class="pill ${pillClass}">${pillLabel}</span>` : `<span class="muted">${pillLabel}</span>`;
@@ -644,9 +957,12 @@ async function renderStopLevels(holdings) {
         </div>`);
     } catch (e) {
       lines.push(`<div>${h.ticker} — <span class="muted">could not fetch price</span></div>`);
+      heatHoldings.push({ ticker: h.ticker, qty: Number(h.qty), avgCost: Number(h.avgCost), currentPrice: Number(h.avgCost), stopPrice: null, sector: sectorFor(h.ticker) });
     }
   }
   box.innerHTML = lines.join("");
+  state.lastHeat = computePortfolioHeat({ holdings: heatHoldings, cash: Number(state.cash) || 0 });
+  renderRiskTab();
 }
 
 async function loadRecentTrades() {
@@ -658,8 +974,155 @@ async function loadRecentTrades() {
     state.recentTrades = {}; // non-fatal — screener just won't show cooldown info
   }
 }
-loadHoldings();
-loadRecentTrades();
+
+/* ---------- config, ledger, risk tab, journal ---------- */
+async function loadConfigAndLedger() {
+  if (!state.sheetUrl) return;
+  try {
+    const cfg = await sheetGet("getConfig");
+    if (cfg.migrated) {
+      state.configRaw = cfg.config;
+      state.riskLimits = {
+        daily: Number(cfg.config.dailyLossLimit) || 150,
+        weekly: Number(cfg.config.weeklyLossLimit) || 300,
+        monthly: Number(cfg.config.monthlyLossLimit) || 600,
+        maxRiskPct: Number(cfg.config.maxRiskPct) || 1
+      };
+      state.strategy = cloneStrategy(DEFAULT_STRATEGY, {
+        version: String(cfg.config.strategyVersion || DEFAULT_STRATEGY.version),
+        weights: {
+          trend: Number(cfg.config.trendWeight), momentum: Number(cfg.config.momentumWeight),
+          volume: Number(cfg.config.volumeWeight), fundamentals: Number(cfg.config.fundamentalsWeight),
+          marketRegime: Number(cfg.config.marketRegimeWeight), riskReward: Number(cfg.config.riskRewardWeight),
+          positionSizing: Number(cfg.config.positionSizingWeight)
+        }
+      });
+    } else {
+      state.configRaw = null; // not migrated yet — keep the built-in defaults
+    }
+  } catch (e) { state.configRaw = null; }
+
+  try {
+    const tx = await sheetGet("transactions");
+    state.ledger = reduceLedger(tx.transactions || []);
+    const limits = { daily: state.riskLimits.daily, weekly: state.riskLimits.weekly, monthly: state.riskLimits.monthly };
+    state.lastLossLimits = evaluateLossLimits({ realizedTrades: state.ledger.realizedTrades, limits });
+    renderPerfBox();
+    renderLimitBanners();
+  } catch (e) {
+    state.ledger = null; // transactions action unavailable (pre-migration) or unreachable
+  }
+  renderSettings();
+  renderRiskTab();
+}
+
+function renderPerfBox() {
+  const box = document.getElementById("perfBox");
+  if (!box) return;
+  if (!state.ledger || !state.ledger.realizedTrades.length) {
+    box.textContent = "No closed (sold) trades yet — this fills in once you have realized P/L to look at.";
+    return;
+  }
+  const s = computeBehaviorStats(state.ledger.realizedTrades);
+  box.innerHTML = `
+    <div class="statgrid">
+      <div class="stat"><b>${s.count}</b>closed trades</div>
+      <div class="stat"><b>${s.winRate.toFixed(0)}%</b>win rate</div>
+      <div class="stat"><b>RM${s.expectancy.toFixed(2)}</b>expectancy/trade</div>
+      <div class="stat"><b>${Number.isFinite(s.profitFactor) ? s.profitFactor.toFixed(2) : "∞"}</b>profit factor</div>
+    </div>
+    ${s.bestSetup ? `<div class="muted" style="margin-top:8px">Best tagged setup: <b>${s.bestSetup.key}</b> (RM${s.bestSetup.pl.toFixed(2)})</div>` : ""}
+    ${s.worstSetup && s.worstSetup !== s.bestSetup ? `<div class="muted">Weakest tagged setup: <b>${s.worstSetup.key}</b> (RM${s.worstSetup.pl.toFixed(2)})</div>` : ""}
+    ${s.worstEmotion ? `<div class="muted">Costliest emotion tag: <b>${s.worstEmotion.key}</b> (RM${s.worstEmotion.pl.toFixed(2)})</div>` : ""}
+    ${s.ruleBrokenCount ? `<div class="muted">Trades where you didn't follow your own plan: <b>${s.ruleBrokenCount}</b> (RM${s.ruleBrokenPL.toFixed(2)})</div>` : ""}
+  `;
+}
+
+function barHtml(pct, dangerAt) {
+  const clamped = Math.max(0, Math.min(100, pct));
+  const cls = clamped >= dangerAt ? "danger" : clamped >= dangerAt * 0.7 ? "warnfill" : "";
+  return `<div class="bar ${cls}"><div style="width:${clamped}%"></div></div>`;
+}
+
+function renderRiskTab() {
+  const heatBox = document.getElementById("heatBox");
+  const lossBox = document.getElementById("lossLimitBox");
+  if (heatBox) {
+    if (!state.sheetUrl) heatBox.textContent = "Connect your Sheet in Settings to see this.";
+    else if (!state.lastHeat) heatBox.textContent = "No holdings to assess yet.";
+    else {
+      const h = state.lastHeat;
+      const sectorRows = h.sectorBreakdown.map(s => `<div>${s.sector}: ${s.pct.toFixed(0)}%${barHtml(s.pct, 40)}</div>`).join("");
+      heatBox.innerHTML = `
+        <div>Portfolio heat: <b>${h.portfolioHeatPct.toFixed(1)}%</b> of total value genuinely at risk if every stop hits${barHtml(h.portfolioHeatPct, 6)}</div>
+        ${h.unquantifiedRiskPositions.length ? `<div class="warn" style="margin-top:8px">No stop set yet on: ${h.unquantifiedRiskPositions.join(", ")} — heat is understated until these get one.</div>` : ""}
+        <div class="muted" style="margin-top:10px">Sector concentration</div>
+        ${sectorRows || '<div class="muted">—</div>'}
+      `;
+    }
+  }
+  if (lossBox) {
+    if (!state.sheetUrl) lossBox.textContent = "Connect your Sheet in Settings to see this.";
+    else if (!state.lastLossLimits) lossBox.textContent = "Run migrateSchemaV2 in Apps Script to enable loss-limit tracking (needs the Transactions/Config tabs).";
+    else {
+      const l = state.lastLossLimits;
+      const row = (label, w) => `<div style="margin-top:8px">${label}: ${w.pctUsed.toFixed(0)}% of limit used${w.breached ? ' <span class="cooldown">BREACHED</span>' : ""}${barHtml(w.pctUsed, 100)}</div>`;
+      lossBox.innerHTML = row("Daily", l.daily) + row("Weekly", l.weekly) + row("Monthly", l.monthly);
+    }
+  }
+  renderLimitBanners();
+}
+
+function renderLimitBanners() {
+  const banner1 = document.getElementById("limitBanner");
+  const banner2 = document.getElementById("riskLimitBanner");
+  const paused = state.lastLossLimits && state.lastLossLimits.paused;
+  const html = paused
+    ? `<div class="warn"><b>TRADING PAUSED</b> — a daily/weekly/monthly loss limit is breached. This is a behavioural check only; it doesn't block your broker, it's here to make you stop and think.</div>`
+    : "";
+  if (banner1) banner1.innerHTML = html;
+  if (banner2) banner2.innerHTML = html;
+}
+
+/* ---------- corporate actions ---------- */
+async function loadCorporateActions() {
+  if (!state.sheetUrl) return;
+  try {
+    const data = await sheetGet("corporateActions");
+    state.corporateActions = data.corporateActions || [];
+    renderCorporateActions();
+  } catch (e) { /* pre-migration or unreachable — leave the list empty */ }
+}
+function renderCorporateActions() {
+  const box = document.getElementById("caList");
+  if (!box) return;
+  if (!state.corporateActions.length) { box.innerHTML = '<span class="muted">None logged yet.</span>'; return; }
+  box.innerHTML = state.corporateActions.map(a =>
+    `<div style="padding:4px 0;border-bottom:1px solid var(--border)">${a.date} — ${a.ticker} — ${a.type}${a.ratio ? ` (ratio ${a.ratio})` : ""}${a.notes ? ` — ${a.notes}` : ""}</div>`
+  ).join("");
+}
+document.getElementById("caAdd").addEventListener("click", async () => {
+  const status = document.getElementById("caStatus");
+  const ticker = document.getElementById("caTicker").value.trim().toUpperCase();
+  if (!ticker) { status.textContent = "Enter a ticker."; return; }
+  const payload = {
+    action: "logCorporateAction",
+    date: document.getElementById("caDate").value || new Date().toISOString().slice(0, 10),
+    ticker: ticker.endsWith(".KL") ? ticker : ticker + ".KL",
+    type: document.getElementById("caType").value,
+    ratio: document.getElementById("caRatio").value,
+    subscriptionPrice: document.getElementById("caPrice").value,
+    notes: document.getElementById("caNotes").value
+  };
+  status.innerHTML = '<span class="spinner"></span> saving...';
+  try {
+    await sheetPost(payload);
+    status.textContent = "Logged.";
+    loadCorporateActions();
+  } catch (e) {
+    status.textContent = "Failed: " + e.message;
+  }
+});
 
 /* ---------- manual trade log ---------- */
 document.getElementById("logTrade").addEventListener("click", async () => {
@@ -670,7 +1133,12 @@ document.getElementById("logTrade").addEventListener("click", async () => {
     side: document.getElementById("tSide").value,
     ticker: document.getElementById("tTicker").value.trim().toUpperCase(),
     qty: Number(document.getElementById("tQty").value),
-    price: Number(document.getElementById("tPrice").value)
+    price: Number(document.getElementById("tPrice").value),
+    fee: document.getElementById("tFee").value,
+    setup: document.getElementById("tSetup").value,
+    emotion: document.getElementById("tEmotion").value,
+    thesis: document.getElementById("tThesis").value,
+    ruleFollowed: document.getElementById("tRuleFollowed").value
   };
   if (!payload.ticker || !payload.qty || !payload.price) { status.textContent = "Fill in ticker, qty and price."; return; }
   if (!payload.ticker.endsWith(".KL")) payload.ticker += ".KL"; // Bursa tickers always need this suffix
@@ -684,8 +1152,10 @@ document.getElementById("logTrade").addEventListener("click", async () => {
   try {
     await sheetPost(payload);
     status.textContent = "Logged.";
+    document.getElementById("tThesis").value = "";
     loadHoldings();
     loadRecentTrades();
+    loadConfigAndLedger();
   } catch (e) {
     status.textContent = "Failed: " + e.message;
   }
@@ -733,7 +1203,7 @@ document.getElementById("importCsv").addEventListener("click", async () => {
   let fills;
   try { fills = parseMoomooCsv(text); } catch (e) { status.textContent = "Could not parse this CSV."; return; }
   const newFills = fills.filter(f => !state.loggedIds.includes(f.id));
-  if (!newFills.length) { status.textContent = "Nothing new to sync."; return; }
+  if (!newFills.length) { status.textContent = "Nothing new to sync."; renderReconciliation(fills); return; }
   status.innerHTML = `<span class="spinner"></span> syncing ${newFills.length} fill(s)...`;
   let ok = 0;
   let firstError = null;
@@ -748,9 +1218,36 @@ document.getElementById("importCsv").addEventListener("click", async () => {
   }
   save(LS.loggedIds, state.loggedIds);
   status.textContent = `Synced ${ok}/${newFills.length} new fill(s).` + (firstError ? ` First error: ${firstError}` : "");
-  loadHoldings();
+  await loadHoldings();
   loadRecentTrades();
+  loadConfigAndLedger();
+  renderReconciliation(fills);
 });
+
+// Compares what THIS CSV export says you hold against what the Sheet
+// currently shows, per ticker — surfaces exactly the kind of "synced 0/6
+// fills" gap this app has hit before, instead of assuming a sync succeeded.
+function renderReconciliation(fills) {
+  const box = document.getElementById("reconcileBox");
+  if (!box) return;
+  if (!fills.length) { box.innerHTML = ""; return; }
+  const csvLedger = reduceLedger(fills.map(f => ({ date: f.date, side: f.side, ticker: f.ticker, qty: f.qty, price: f.price })));
+  const result = reconcileHoldings({ csvHoldings: csvLedger.holdings, sheetHoldings: state.lastHoldings });
+  if (result.ok) {
+    box.innerHTML = `<div class="ok">✓ Reconciled — this CSV's holdings match the Sheet exactly for every ticker it covers.</div>`;
+    return;
+  }
+  const rows = result.mismatches.map(m =>
+    `<div>${m.ticker}: CSV says <b>${m.csvQty}</b>, Sheet says <b>${m.sheetQty}</b>${m.qtyDiff ? ` (off by ${m.qtyDiff})` : ""}${m.costMatch === false ? " — avg cost also differs" : ""}</div>`
+  ).join("");
+  box.innerHTML = `<div class="warn"><b>Reconciliation mismatch</b> — the Sheet doesn't match what this CSV says you hold.<br>${rows}<div class="muted" style="margin-top:6px">${result.note}</div></div>`;
+}
+
+/* ---------- startup ---------- */
+loadHoldings();
+loadRecentTrades();
+loadConfigAndLedger();
+loadCorporateActions();
 </script>
 </body>
 </html>
