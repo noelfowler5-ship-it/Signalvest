@@ -1,1 +1,8 @@
-{}
+{
+  "signals": {
+    "0036.KL": "AVOID"
+  },
+  "stops": {
+    "0036.KL": "breached"
+  }
+}
