@@ -1,17 +1,29 @@
 #!/usr/bin/env node
 /**
  * Runs in GitHub Actions on a schedule. Recomputes signals for the bundled
- * universe (+ whatever you're currently holding, per your private Sheet)
- * and messages Telegram when a ticker's signal changes.
+ * universe (+ whatever you're currently holding, per your private Sheet),
+ * scores new candidates through the decision engine, checks portfolio-level
+ * risk (heat, loss limits), classifies the market regime, and messages
+ * Telegram when something actually changes.
  *
  * IMPORTANT — this repo is public, and Actions logs on a public repo are
  * public too. Never console.log real RM amounts, holdings quantities or
- * anything else personal here. Budget-fit is only ever reported as a
- * yes/no boolean, never as the underlying cash figure.
+ * anything else personal here — and the SAME rule applies to the Telegram
+ * message body, even though that goes to a private chat: defense in depth,
+ * in case the bot token or chat ever leaks. Budget-fit, portfolio risk and
+ * loss-limit usage are always reported as a percentage or yes/no, never as
+ * the underlying RM figure. Position sizing is computed internally (it's
+ * needed to derive portfolio-risk %) but the resulting share count and RM
+ * totals are never printed or messaged.
  */
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
+import { reduceLedger } from "../lib/ledger.mjs";
+import { computePositionSize, computePortfolioHeat, evaluateLossLimits } from "../lib/risk.mjs";
+import { scoreCandidate, computeEntryStopTarget, buildDecisionCard } from "../lib/decision.mjs";
+import { classifyRegime } from "../lib/regime.mjs";
+import { cloneStrategy, DEFAULT_STRATEGY } from "../lib/strategy.mjs";
 
 const {
   TELEGRAM_BOT_TOKEN,
@@ -22,6 +34,7 @@ const {
 
 const STATE_PATH = path.join(process.cwd(), "data", "last-signals.json");
 const COOLDOWN_DAYS = 30; // matches index.html — flag churn instead of nudging a fresh trade right after one
+const PORTFOLIO_HEAT_LIMIT_PCT = 6; // alert when total capital-at-risk crosses this
 
 async function fetchJSON(url, opts) {
   const r = await fetch(url, opts);
@@ -102,7 +115,7 @@ function classify(closes) {
   else if (trend === "up" && r > 68) signal = "HOLD";
   else if (trend === "down" && r < 30) signal = "HOLD";
   else if (trend === "down") signal = "AVOID";
-  return { trend, rsi: r, signal };
+  return { trend, rsi: r, signal, sma20: s20, sma50: s50 };
 }
 
 async function getHoldings() {
@@ -173,12 +186,53 @@ async function getRecentTrades() {
   }
 }
 
+async function getConfig() {
+  const defaults = {
+    dailyLossLimit: 150, weeklyLossLimit: 300, monthlyLossLimit: 600, maxRiskPct: 1,
+    trendWeight: 2, momentumWeight: 1, volumeWeight: 1, fundamentalsWeight: 2,
+    marketRegimeWeight: 1, riskRewardWeight: 2, positionSizingWeight: 1, strategyVersion: "1.0"
+  };
+  if (!SHEET_ENDPOINT || !SHEET_SECRET) return defaults;
+  try {
+    const data = await fetchJSON(`${SHEET_ENDPOINT}?secret=${encodeURIComponent(SHEET_SECRET)}&action=getConfig`);
+    return { ...defaults, ...(data.config || {}) };
+  } catch {
+    return defaults; // Config tab not migrated yet, or Sheet unreachable — fall back quietly
+  }
+}
+
+async function getTransactions() {
+  if (!SHEET_ENDPOINT || !SHEET_SECRET) return [];
+  try {
+    const data = await fetchJSON(`${SHEET_ENDPOINT}?secret=${encodeURIComponent(SHEET_SECRET)}&action=transactions`);
+    return data.transactions || [];
+  } catch {
+    return []; // transactions action not available yet (pre-migration), or Sheet unreachable
+  }
+}
+
+async function postSnapshot(portfolioValue, cash, investedCapital) {
+  if (!SHEET_ENDPOINT || !SHEET_SECRET) return;
+  try {
+    const today = new Date();
+    const params = new URLSearchParams({
+      secret: SHEET_SECRET, action: "snapshot",
+      date: today.toISOString().slice(0, 10), time: today.toISOString().slice(11, 16),
+      portfolioValue: String(portfolioValue), cash: String(cash), investedCapital: String(investedCapital),
+      source: "check-signals"
+    });
+    await fetch(`${SHEET_ENDPOINT}?${params.toString()}`);
+  } catch {
+    // best-effort — a missed snapshot just leaves a gap in the benchmarking history
+  }
+}
+
 async function loadState() {
   try {
     const s = JSON.parse(await readFile(STATE_PATH, "utf8"));
-    return { signals: s.signals || {}, stops: s.stops || {} };
+    return { signals: s.signals || {}, stops: s.stops || {}, regime: s.regime || null, heatBreach: !!s.heatBreach, paused: !!s.paused };
   } catch {
-    return { signals: {}, stops: {} };
+    return { signals: {}, stops: {}, regime: null, heatBreach: false, paused: false };
   }
 }
 
@@ -199,16 +253,40 @@ async function sendTelegram(text) {
   });
 }
 
+function sectorFor(universe, code) {
+  const u = universe.find(x => x.code.toUpperCase() === code.toUpperCase());
+  return u?.sector || "Unclassified";
+}
+
 async function main() {
   const universe = JSON.parse(await readFile(path.join(process.cwd(), "universe.json"), "utf8"));
   const holdings = await getHoldings();
-  const cash = await getCashAvailable(); // used only for a yes/no fit check, never logged or messaged as a number
+  const cash = await getCashAvailable(); // used only for a yes/no fit check + internal risk math, never logged/messaged as RM
   const recentTrades = await getRecentTrades(); // ticker -> {date, side}, for the cooldown note below
+  const configRaw = await getConfig();
+  const strategy = cloneStrategy(DEFAULT_STRATEGY, {
+    version: String(configRaw.strategyVersion || DEFAULT_STRATEGY.version),
+    weights: {
+      trend: Number(configRaw.trendWeight), momentum: Number(configRaw.momentumWeight),
+      volume: Number(configRaw.volumeWeight), fundamentals: Number(configRaw.fundamentalsWeight),
+      marketRegime: Number(configRaw.marketRegimeWeight), riskReward: Number(configRaw.riskRewardWeight),
+      positionSizing: Number(configRaw.positionSizingWeight)
+    }
+  });
+  const maxRiskPct = Number(configRaw.maxRiskPct) || 1;
+
+  const rawTransactions = await getTransactions();
+  const { realizedTrades } = reduceLedger(rawTransactions);
+  const lossLimits = evaluateLossLimits({
+    realizedTrades,
+    limits: { daily: Number(configRaw.dailyLossLimit), weekly: Number(configRaw.weeklyLossLimit), monthly: Number(configRaw.monthlyLossLimit) }
+  });
 
   const heldSet = new Set(holdings.map(h => h.ticker.toUpperCase()));
   const avgCostByTicker = new Map(holdings.map(h => [h.ticker.toUpperCase(), Number(h.avgCost)]));
+  const qtyByTicker = new Map(holdings.map(h => [h.ticker.toUpperCase(), Number(h.qty)]));
   for (const h of holdings) {
-    if (!universe.find(u => u.code.toUpperCase() === h.ticker.toUpperCase())) universe.push({ code: h.ticker, name: h.ticker });
+    if (!universe.find(u => u.code.toUpperCase() === h.ticker.toUpperCase())) universe.push({ code: h.ticker, name: h.ticker, sector: "Unclassified" });
   }
 
   const prevState = await loadState();
@@ -216,6 +294,8 @@ async function main() {
   const nextStops = {};
   const changes = [];
   const stopAlerts = [];
+  const heatHoldings = []; // for computePortfolioHeat, accumulated as we go
+  let upCount = 0, classifiedCount = 0;
 
   for (const stock of universe) {
     let hist;
@@ -230,11 +310,26 @@ async function main() {
     const cls = classify(closes);
     if (!cls) continue;
 
+    classifiedCount++;
+    if (cls.trend === "up") upCount++;
+
     const isHeld = heldSet.has(stock.code.toUpperCase());
     const liquid = avgVol20 >= 50000;
-    if (!isHeld && !liquid) continue;
 
     const price = closes[closes.length - 1];
+
+    if (isHeld) {
+      const avgCost = avgCostByTicker.get(stock.code.toUpperCase());
+      const qty = qtyByTicker.get(stock.code.toUpperCase()) || 0;
+      const info = avgCost != null ? computeStopInfo(hist, avgCost) : null;
+      heatHoldings.push({
+        ticker: stock.code, qty, avgCost, currentPrice: price,
+        stopPrice: info ? info.operative : null, sector: sectorFor(universe, stock.code)
+      });
+    }
+
+    if (!isHeld && !liquid) continue;
+
     const fitsBudget = cash == null ? null : price * 100 <= cash;
     if (!isHeld && cash != null && fitsBudget === false) continue;
 
@@ -248,9 +343,46 @@ async function main() {
         const days = Math.floor((Date.now() - new Date(rt.date).getTime()) / 86400000);
         if (days < COOLDOWN_DAYS) cooldownLine = `\n⚠️ You ${rt.side.toLowerCase()}ed this ${days}d ago — mind fee drag before trading again`;
       }
+
+      // Decision-engine card for a fresh, non-held BUY signal — the richer
+      // "signal card" format from the spec. Skipped for HOLD/AVOID changes
+      // and for held tickers (those already get stop-level guidance below).
+      let decisionLines = "";
+      if (!isHeld && cls.signal === "BUY") {
+        const base = scoreCandidate({
+          hist, cls, avgVol20,
+          regime: prevState.regime || "NEUTRAL", // best available at scoring time; the regime section below reports the current one
+          fundamentals: null, // never fabricated — Node has no way to verify this
+          strategy
+        });
+        const ets = computeEntryStopTarget({ currentPrice: price, highs: hist.map(h => h.high), lows: hist.map(h => h.low), closes });
+        let sizing = null;
+        if (cash != null && ets) {
+          const investedCapital = holdings.reduce((s, h) => s + (Number(h.qty) || 0) * (avgCostByTicker.get(h.ticker.toUpperCase()) || 0), 0);
+          const portfolioValue = cash + investedCapital;
+          sizing = computePositionSize({ portfolioValue, maxRiskPct, entry: price, stop: ets.stop, cash, target: ets.target });
+        }
+        if (ets) {
+          const card = buildDecisionCard({ ticker: stock.code, name: stock.name, currentPrice: price, base, entryStopTarget: ets, positionSizing: sizing, strategy });
+          const topPositives = card.positives.slice(0, 3).map(p => `✓ ${p}`).join("\n");
+          const topRisks = card.risks.slice(0, 2).map(r => `⚠ ${r}`).join("\n");
+          decisionLines =
+            `\nScore: ${card.score.toFixed(0)}/${card.maxScore.toFixed(0)}` +
+            `\nEntry: RM${card.entry[0].toFixed(3)}–${card.entry[1].toFixed(3)}` +
+            `\nStop: RM${card.stop.toFixed(3)}` +
+            `\nTarget: RM${card.target.toFixed(3)}` +
+            `\nR:R: ${card.rr.toFixed(1)}` +
+            (sizing && sizing.valid && sizing.portfolioRiskPct != null ? `\nPortfolio risk: ${sizing.portfolioRiskPct.toFixed(1)}%` : "") +
+            (topPositives ? `\n${topPositives}` : "") +
+            (topRisks ? `\n${topRisks}` : "") +
+            `\n${card.invalidation}` +
+            `\n_Not an execution order._`;
+        }
+      }
+
       changes.push(
         `*${stock.code}* (${stock.name})${isHeld ? " — held" : ""}\n` +
-        `${prevSignal ? prevSignal + " → " : ""}*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · RM${price.toFixed(3)}${fitLine}${cooldownLine}`
+        `${prevSignal ? prevSignal + " → " : ""}*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · RM${price.toFixed(3)}${fitLine}${cooldownLine}${decisionLines}`
       );
     }
 
@@ -274,18 +406,68 @@ async function main() {
     }
   }
 
-  const sections = [];
-  if (changes.length) sections.push(`*Signal changes*\n\n${changes.join("\n\n")}`);
-  if (stopAlerts.length) sections.push(`*Stop-loss / trailing-stop*\n\n${stopAlerts.join("\n\n")}`);
+  // --- Market regime ---------------------------------------------------
+  let regime = null;
+  try {
+    const klciHist = await fetchHistory("^KLSE");
+    const breadthPct = classifiedCount > 0 ? (upCount / classifiedCount) * 100 : null;
+    regime = classifyRegime({ klciCloses: klciHist.map(h => h.close), breadthPct });
+  } catch {
+    console.log("could not fetch KLCI history — skipping regime classification this run");
+  }
+  const regimeAlert = regime && regime.regime !== prevState.regime
+    ? `*Market regime: ${regime.regime.replace("_", "-")}*\n${regime.reasons.slice(0, 2).join("\n")}\n_${regime.disclaimer}_`
+    : null;
 
-  if (sections.length) {
-    await sendTelegram(`*Signalvest update*\n\n${sections.join("\n\n")}\n\n_Not financial advice — you place any exit yourself._`);
-    console.log(`sent ${changes.length} signal change(s), ${stopAlerts.length} stop alert(s)`);
-  } else {
-    console.log("no signal or stop changes this run");
+  // --- Portfolio heat ----------------------------------------------------
+  let heatAlert = null;
+  let heat = null;
+  if (cash != null && heatHoldings.length) {
+    heat = computePortfolioHeat({ holdings: heatHoldings, cash });
+    const nowBreached = heat.portfolioHeatPct >= PORTFOLIO_HEAT_LIMIT_PCT;
+    if (nowBreached !== prevState.heatBreach) {
+      heatAlert = nowBreached
+        ? `🔴 *Portfolio risk warning*\nPortfolio heat ${heat.portfolioHeatPct.toFixed(1)}% — above your ${PORTFOLIO_HEAT_LIMIT_PCT}% comfort threshold.` +
+          (heat.largestSector ? `\nLargest sector: ${heat.largestSector.sector} (${heat.largestSector.pct.toFixed(0)}%)` : "") +
+          (heat.unquantifiedRiskPositions.length ? `\n⚠ No stop set on: ${heat.unquantifiedRiskPositions.join(", ")}` : "")
+        : `🟢 Portfolio heat back under ${PORTFOLIO_HEAT_LIMIT_PCT}% (${heat.portfolioHeatPct.toFixed(1)}%).`;
+    }
+    // Snapshot for benchmarking/drawdown history — RM figures go straight to
+    // your private Sheet only, never through Telegram or console.log.
+    await postSnapshot(heat.totalValue, cash, heat.investedCapital);
   }
 
-  await saveState({ signals: nextSignals, stops: nextStops });
+  // --- Loss limits / trading pause ---------------------------------------
+  let limitAlert = null;
+  if (lossLimits.paused !== prevState.paused) {
+    if (lossLimits.paused) {
+      const breachedWindows = ["daily", "weekly", "monthly"].filter(w => lossLimits[w].breached);
+      limitAlert = `🔴 *TRADING PAUSED*\n${breachedWindows.map(w => `${w} loss limit: ${lossLimits[w].pctUsed.toFixed(0)}% used`).join("\n")}\nThis is a behavioural check only — nothing here blocks your broker.`;
+    } else {
+      limitAlert = `🟢 Loss-limit pause lifted — back within your daily/weekly/monthly limits.`;
+    }
+  }
+
+  const sections = [];
+  if (regimeAlert) sections.push(regimeAlert);
+  if (changes.length) sections.push(`*Signal changes*\n\n${changes.join("\n\n")}`);
+  if (stopAlerts.length) sections.push(`*Stop-loss / trailing-stop*\n\n${stopAlerts.join("\n\n")}`);
+  if (heatAlert) sections.push(heatAlert);
+  if (limitAlert) sections.push(limitAlert);
+
+  if (sections.length) {
+    await sendTelegram(`*Signalvest update*\n\n${sections.join("\n\n")}\n\n_Not financial advice — you place any trade yourself, nothing here executes on Moomoo._`);
+    console.log(`sent update: ${changes.length} signal change(s), ${stopAlerts.length} stop alert(s), regime alert ${!!regimeAlert}, heat alert ${!!heatAlert}, limit alert ${!!limitAlert}`);
+  } else {
+    console.log("no signal, stop, regime, heat or loss-limit changes this run");
+  }
+
+  await saveState({
+    signals: nextSignals, stops: nextStops,
+    regime: regime ? regime.regime : prevState.regime,
+    heatBreach: heat ? heat.portfolioHeatPct >= PORTFOLIO_HEAT_LIMIT_PCT : prevState.heatBreach,
+    paused: lossLimits.paused
+  });
 }
 
 main().catch(err => {
