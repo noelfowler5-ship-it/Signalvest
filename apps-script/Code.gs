@@ -263,6 +263,16 @@ function doGet(e) {
     return json_({ ok: true, cashAvailable: cash });
   }
 
+  // Records a human decision (Approve/Reject/Watch) on a screened candidate —
+  // this NEVER places, modifies or implies a Moomoo order. It's purely a
+  // decision-journal entry; the trade itself, if any, is still logged
+  // separately via `log` once you've actually executed it with your broker.
+  if (action === "logDecision") {
+    const p = e.parameter;
+    logAudit_(ss, "Decision recorded", `${p.decision} — ${p.ticker} (score ${p.score || "?"})`, "", p.decision, p.source);
+    return json_({ ok: true });
+  }
+
   // Logging via GET, not just POST: Apps Script Web Apps 302-redirect every
   // request internally, and some mobile browsers follow that redirect by
   // converting POST to GET and dropping the body (and the secret in it) —
