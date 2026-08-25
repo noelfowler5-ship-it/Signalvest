@@ -227,6 +227,24 @@ async function postSnapshot(portfolioValue, cash, investedCapital) {
   }
 }
 
+// Overwrites the Sheet's Signals tab with this run's full results — feeds
+// the Telegram/Gemini advisor bot (via Make.com) so it can answer "why
+// Maybank?" on demand instead of only what happened to change this run.
+// RM figures go straight into the private Sheet only, same as postSnapshot —
+// never through Telegram or console.log from this script.
+async function postSignals(signals) {
+  if (!SHEET_ENDPOINT || !SHEET_SECRET) return;
+  try {
+    await fetch(SHEET_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secret: SHEET_SECRET, action: "writeSignals", signals, generatedAt: new Date().toISOString() })
+    });
+  } catch {
+    // best-effort — a missed write just leaves the bot's context stale until the next run
+  }
+}
+
 async function loadState() {
   try {
     const s = JSON.parse(await readFile(STATE_PATH, "utf8"));
@@ -295,6 +313,7 @@ async function main() {
   const changes = [];
   const stopAlerts = [];
   const heatHoldings = []; // for computePortfolioHeat, accumulated as we go
+  const signalRows = []; // every scanned/held ticker's latest state, for the Signals tab (bot context)
   let upCount = 0, classifiedCount = 0;
 
   for (const stock of universe) {
@@ -334,6 +353,35 @@ async function main() {
     if (!isHeld && cash != null && fitsBudget === false) continue;
 
     nextSignals[stock.code] = cls.signal;
+
+    // Full decision card for a non-held BUY candidate — computed every run
+    // (not just when the signal changes) so the Signals tab always reflects
+    // the current score/entry/stop/target, for the Telegram/Gemini bot.
+    let card = null, sizing = null;
+    if (!isHeld && cls.signal === "BUY") {
+      const base = scoreCandidate({
+        hist, cls, avgVol20,
+        regime: prevState.regime || "NEUTRAL", // best available at scoring time; the regime section below reports the current one
+        fundamentals: null, // never fabricated — Node has no way to verify this
+        strategy
+      });
+      const ets = computeEntryStopTarget({ currentPrice: price, highs: hist.map(h => h.high), lows: hist.map(h => h.low), closes });
+      if (cash != null && ets) {
+        const investedCapital = holdings.reduce((s, h) => s + (Number(h.qty) || 0) * (avgCostByTicker.get(h.ticker.toUpperCase()) || 0), 0);
+        const portfolioValue = cash + investedCapital;
+        sizing = computePositionSize({ portfolioValue, maxRiskPct, entry: price, stop: ets.stop, cash, target: ets.target });
+      }
+      if (ets) card = buildDecisionCard({ ticker: stock.code, name: stock.name, currentPrice: price, base, entryStopTarget: ets, positionSizing: sizing, strategy });
+    }
+
+    signalRows.push({
+      ticker: stock.code, name: stock.name, signal: cls.signal, trend: cls.trend, rsi: cls.rsi, price, held: isHeld,
+      score: card ? card.score : null,
+      entryLow: card ? card.entry[0] : null, entryHigh: card ? card.entry[1] : null,
+      stop: card ? card.stop : null, target: card ? card.target : null, rr: card ? card.rr : null,
+      positives: card ? card.positives.slice(0, 3) : [], risks: card ? card.risks.slice(0, 2) : []
+    });
+
     const prevSignal = prevState.signals[stock.code];
     if (prevSignal !== cls.signal) {
       const fitLine = fitsBudget == null ? "" : `\nFits your current budget: ${fitsBudget ? "yes" : "no"}`;
@@ -344,40 +392,25 @@ async function main() {
         if (days < COOLDOWN_DAYS) cooldownLine = `\n⚠️ You ${rt.side.toLowerCase()}ed this ${days}d ago — mind fee drag before trading again`;
       }
 
-      // Decision-engine card for a fresh, non-held BUY signal — the richer
-      // "signal card" format from the spec. Skipped for HOLD/AVOID changes
-      // and for held tickers (those already get stop-level guidance below).
+      // Decision-engine card lines for a fresh, non-held BUY signal — the
+      // richer "signal card" format from the spec. Skipped for HOLD/AVOID
+      // changes and for held tickers (those already get stop-level guidance
+      // below). `card`/`sizing` were already computed above.
       let decisionLines = "";
-      if (!isHeld && cls.signal === "BUY") {
-        const base = scoreCandidate({
-          hist, cls, avgVol20,
-          regime: prevState.regime || "NEUTRAL", // best available at scoring time; the regime section below reports the current one
-          fundamentals: null, // never fabricated — Node has no way to verify this
-          strategy
-        });
-        const ets = computeEntryStopTarget({ currentPrice: price, highs: hist.map(h => h.high), lows: hist.map(h => h.low), closes });
-        let sizing = null;
-        if (cash != null && ets) {
-          const investedCapital = holdings.reduce((s, h) => s + (Number(h.qty) || 0) * (avgCostByTicker.get(h.ticker.toUpperCase()) || 0), 0);
-          const portfolioValue = cash + investedCapital;
-          sizing = computePositionSize({ portfolioValue, maxRiskPct, entry: price, stop: ets.stop, cash, target: ets.target });
-        }
-        if (ets) {
-          const card = buildDecisionCard({ ticker: stock.code, name: stock.name, currentPrice: price, base, entryStopTarget: ets, positionSizing: sizing, strategy });
-          const topPositives = card.positives.slice(0, 3).map(p => `✓ ${p}`).join("\n");
-          const topRisks = card.risks.slice(0, 2).map(r => `⚠ ${r}`).join("\n");
-          decisionLines =
-            `\nScore: ${card.score.toFixed(0)}/${card.maxScore.toFixed(0)}` +
-            `\nEntry: RM${card.entry[0].toFixed(3)}–${card.entry[1].toFixed(3)}` +
-            `\nStop: RM${card.stop.toFixed(3)}` +
-            `\nTarget: RM${card.target.toFixed(3)}` +
-            `\nR:R: ${card.rr.toFixed(1)}` +
-            (sizing && sizing.valid && sizing.portfolioRiskPct != null ? `\nPortfolio risk: ${sizing.portfolioRiskPct.toFixed(1)}%` : "") +
-            (topPositives ? `\n${topPositives}` : "") +
-            (topRisks ? `\n${topRisks}` : "") +
-            `\n${card.invalidation}` +
-            `\n_Not an execution order._`;
-        }
+      if (card) {
+        const topPositives = card.positives.slice(0, 3).map(p => `✓ ${p}`).join("\n");
+        const topRisks = card.risks.slice(0, 2).map(r => `⚠ ${r}`).join("\n");
+        decisionLines =
+          `\nScore: ${card.score.toFixed(0)}/${card.maxScore.toFixed(0)}` +
+          `\nEntry: RM${card.entry[0].toFixed(3)}–${card.entry[1].toFixed(3)}` +
+          `\nStop: RM${card.stop.toFixed(3)}` +
+          `\nTarget: RM${card.target.toFixed(3)}` +
+          `\nR:R: ${card.rr.toFixed(1)}` +
+          (sizing && sizing.valid && sizing.portfolioRiskPct != null ? `\nPortfolio risk: ${sizing.portfolioRiskPct.toFixed(1)}%` : "") +
+          (topPositives ? `\n${topPositives}` : "") +
+          (topRisks ? `\n${topRisks}` : "") +
+          `\n${card.invalidation}` +
+          `\n_Not an execution order._`;
       }
 
       changes.push(
@@ -447,6 +480,8 @@ async function main() {
       limitAlert = `🟢 Loss-limit pause lifted — back within your daily/weekly/monthly limits.`;
     }
   }
+
+  await postSignals(signalRows);
 
   const sections = [];
   if (regimeAlert) sections.push(regimeAlert);

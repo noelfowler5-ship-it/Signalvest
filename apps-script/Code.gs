@@ -34,8 +34,19 @@ const SHEET_NAMES = {
   CONFIG: "Config",
   CORPORATE_ACTIONS: "Corporate Actions",
   AUDIT_LOG: "Audit Log",
-  SNAPSHOTS: "Snapshots"
+  SNAPSHOTS: "Snapshots",
+  SIGNALS: "Signals"
 };
+
+// Signals tab columns — one row per ticker, fully OVERWRITTEN on every scanner
+// run (unlike every other tab here, this is a "latest known state" cache, not
+// an append-only log — so a stale row never lingers after a ticker's signal
+// changes or it drops out of the universe).
+const SIGNALS_HEADERS = [
+  "Ticker", "Name", "Signal", "Trend", "RSI", "Price (RM)", "Held",
+  "Score", "Entry Low (RM)", "Entry High (RM)", "Stop (RM)", "Target (RM)", "R:R",
+  "Positives", "Risks", "Updated At"
+];
 
 // Transactions columns beyond the original A-G (Date/Side/Ticker/Qty/Price/Amount/Source).
 // Additive only — never reorders or renames A-G. Every one of these is optional/nullable
@@ -177,8 +188,9 @@ function migrateSchemaV2() {
   ensureTab(SHEET_NAMES.CORPORATE_ACTIONS, ["Date", "Ticker", "Type", "Ratio", "Subscription Price (RM)", "Notes"]);
   ensureTab(SHEET_NAMES.AUDIT_LOG, ["Timestamp", "Event", "Detail", "Old Value", "New Value", "Source"]);
   ensureTab(SHEET_NAMES.SNAPSHOTS, ["Date", "Time", "Portfolio Value (RM)", "Cash (RM)", "Invested Capital (RM)", "Source"]);
+  ensureTab(SHEET_NAMES.SIGNALS, SIGNALS_HEADERS);
 
-  ss.toast("Schema V2 migration complete: Transactions extended with 10 new columns (H:Q), 4 new tabs created. No existing data was modified.");
+  ss.toast("Schema V2 migration complete: Transactions extended with 10 new columns (H:Q), 5 new tabs created. No existing data was modified.");
 }
 
 /**
@@ -426,7 +438,49 @@ function doGet(e) {
     return json_({ recentTrades: last });
   }
 
+  if (action === "signals") {
+    return json_({ signals: readSignals_(ss) });
+  }
+
+  // One-shot bundle for the Telegram/Gemini advisor bot (via Make.com): the
+  // latest scan results, current holdings, cash, and strategy config in a
+  // single call, so the bot doesn't need four round trips per question.
+  if (action === "context") {
+    const hold = ss.getSheetByName(SHEET_NAMES.HOLDINGS);
+    const holdRows = hold ? hold.getDataRange().getValues().slice(1).filter(r => r[0] && r[1] > 0) : [];
+    const budget = ss.getSheetByName(SHEET_NAMES.BUDGET);
+    const cashAvailable = budget ? Number(budget.getRange("B1").getValue()) || 0 : 0;
+    const configSh = ss.getSheetByName(SHEET_NAMES.CONFIG);
+    const config = {};
+    if (configSh) {
+      configSh.getDataRange().getValues().slice(1).filter(r => r[0]).forEach(r => { config[r[0]] = r[1]; });
+    }
+    return json_({
+      signals: readSignals_(ss),
+      holdings: holdRows.map(r => ({ ticker: r[0], qty: r[1], avgCost: r[2] })),
+      cashAvailable,
+      config
+    });
+  }
+
   return json_({ error: "unknown action" });
+}
+
+// Shared reader for the Signals tab — used by both the `signals` and
+// `context` actions above.
+function readSignals_(ss) {
+  const sh = ss.getSheetByName(SHEET_NAMES.SIGNALS);
+  if (!sh) return [];
+  const rows = sh.getDataRange().getValues().slice(1).filter(r => r[0]);
+  return rows.map(r => ({
+    ticker: r[0], name: r[1], signal: r[2], trend: r[3], rsi: r[4], price: r[5], held: r[6],
+    score: r[7] === "" ? null : r[7],
+    entryLow: r[8] === "" ? null : r[8], entryHigh: r[9] === "" ? null : r[9],
+    stop: r[10] === "" ? null : r[10], target: r[11] === "" ? null : r[11], rr: r[12] === "" ? null : r[12],
+    positives: r[13] ? String(r[13]).split(" | ").filter(Boolean) : [],
+    risks: r[14] ? String(r[14]).split(" | ").filter(Boolean) : [],
+    updatedAt: r[15] instanceof Date ? r[15].toISOString() : r[15]
+  }));
 }
 
 function doPost(e) {
@@ -440,6 +494,33 @@ function doPost(e) {
     const amount = Number(body.qty) * Number(body.price);
     tx.appendRow([body.date, body.side, body.ticker, Number(body.qty), Number(body.price), amount, body.source || "app"]);
     return json_({ ok: true });
+  }
+
+  // Called by scripts/check-signals.mjs (GitHub Actions) at the end of every
+  // scan. Overwrites the whole Signals tab with this run's results — it's a
+  // "latest known state" cache, not a log, so a ticker whose signal changed
+  // or dropped out of the universe never leaves a stale row behind.
+  if (body.action === "writeSignals") {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(SHEET_NAMES.SIGNALS);
+    if (!sh) return json_({ error: "Signals tab not found — run migrateSchemaV2 first" });
+    const list = Array.isArray(body.signals) ? body.signals : [];
+    const lastRow = sh.getLastRow();
+    if (lastRow > 1) sh.getRange(2, 1, lastRow - 1, SIGNALS_HEADERS.length).clearContent();
+    if (list.length) {
+      const rows = list.map(s => [
+        s.ticker || "", s.name || "", s.signal || "", s.trend || "", s.rsi != null ? s.rsi : "",
+        s.price != null ? s.price : "", s.held ? "TRUE" : "FALSE",
+        s.score != null ? s.score : "",
+        s.entryLow != null ? s.entryLow : "", s.entryHigh != null ? s.entryHigh : "",
+        s.stop != null ? s.stop : "", s.target != null ? s.target : "", s.rr != null ? s.rr : "",
+        Array.isArray(s.positives) ? s.positives.join(" | ") : "",
+        Array.isArray(s.risks) ? s.risks.join(" | ") : "",
+        body.generatedAt || new Date().toISOString()
+      ]);
+      sh.getRange(2, 1, rows.length, SIGNALS_HEADERS.length).setValues(rows);
+    }
+    return json_({ ok: true, count: list.length });
   }
 
   return json_({ error: "unknown action" });

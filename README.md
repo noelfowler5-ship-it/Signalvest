@@ -55,13 +55,15 @@ which only you can access.
      Currency, Strategy Version, Signal Score, Setup, Emotion, Thesis,
      Invalidation, Rule Followed.** Existing rows get `Type` backfilled
      from `Side`; everything else stays blank until you fill it in.
-   - 4 new tabs: **Config** (risk limits + decision-score weights, seeded
+   - 5 new tabs: **Config** (risk limits + decision-score weights, seeded
      with sensible defaults — edit from the app's Settings tab, not by
      hand), **Corporate Actions** (manual split/bonus/rights/merger log),
      **Audit Log** (append-only, auto-filled by every write the app or
      Action makes), **Snapshots** (portfolio value over time, filled in by
      the scheduled Action — this is what benchmarking/drawdown history
-     will eventually read from).
+     will eventually read from), **Signals** (every ticker's latest signal/
+     score/entry/stop/target — overwritten on every scheduled scan; this is
+     what the Telegram bot in "Ask Signalvest questions" below reads from).
 
    Safe to skip if you only want the original screener/portfolio
    behavior — everything above is additive and the app degrades
@@ -173,6 +175,111 @@ True real-time auto-detection of fills isn't realistic here: Moomoo's
 OpenAPI needs their desktop gateway (OpenD) running on a machine, which a
 free cloud cron job can't reach. The CSV import is the practical middle
 ground — no live polling infrastructure, but no manual retyping either.
+
+## Ask Signalvest questions (Telegram + Make.com + Gemini)
+
+The scheduled GitHub Action above is one-way: it messages you when
+something changes, on its own schedule. This section adds a second,
+**optional** path — texting Signalvest questions like *"why Maybank?"* or
+*"what should I buy this week?"* and getting an answer back, any time.
+
+**How it fits together** — three pieces, each doing one job:
+
+```
+You (Telegram)
+     │  "why Maybank?"
+     ▼
+Make.com scenario           ← the only new piece; everything else already exists
+     │  1. reads your Sheet's `context` endpoint (signals + holdings + cash + config)
+     │  2. hands that + your question to Gemini, with a system prompt that
+     │     forbids Gemini from inventing its own BUY/SELL opinion
+     ▼
+Gemini (explains only — never decides)
+     │
+     ▼
+Telegram reply, back to you
+```
+
+Signalvest's scan/score logic (`lib/decision.js`, tested by `test/*.test.mjs`)
+is unchanged and stays the source of truth. Make.com and Gemini are pure
+plumbing on top — if you never set this up, the scheduled alerts keep
+working exactly as before.
+
+### What the Sheet now provides for this
+
+Two new `doGet`/`doPost` actions in `apps-script/Code.gs` (added by
+`migrateSchemaV2`, see above):
+
+- **`writeSignals`** (POST) — `scripts/check-signals.mjs` calls this at the
+  end of every scheduled run, overwriting the `Signals` tab with that run's
+  full results (ticker, signal, trend, RSI, price, and — for BUY candidates
+  you don't already hold — score/entry/stop/target/R:R/positives/risks).
+  It's a snapshot of "latest known state," not a growing log.
+- **`context`** (GET) — one call that bundles `Signals` + `Holdings` +
+  cash available + your `Config` (risk limits, strategy weights) into a
+  single JSON response, so the Make.com scenario only needs one HTTP
+  request per question instead of four.
+
+Both need `migrateSchemaV2` to have been run at least once (for the
+`Signals` tab to exist) — safe to re-run if you're not sure.
+
+### Setting up the Make.com scenario
+
+You'll need: your Make.com account (already have it), a Telegram bot token
+(same one from the GitHub Actions setup, or a new bot via @BotFather if you
+want to keep them separate), and a Gemini API key from
+[aistudio.google.com](https://aistudio.google.com) (free tier). **Paste the
+Gemini key into Make's own connection screen in step 3 below — never into
+a chat with an AI assistant, a support ticket, or anywhere else.**
+
+1. **New scenario** → search for and add a **Telegram Bot** module,
+   trigger type "Watch Updates". Click "Add" next to Connection, paste your
+   bot token there (Make stores it encrypted, not in the scenario itself).
+   This module fires every time you message the bot.
+
+2. **Add an HTTP module** ("Make a request"). URL:
+   `https://script.google.com/.../exec?secret=YOUR_SECRET&action=context`
+   (your deployed Apps Script `/exec` URL — same one from Settings — with
+   your shared secret appended). Method: GET. This is the one call that
+   fetches signals + holdings + cash + config in one shot.
+
+3. **Add a Google Gemini module** ("Create a Completion" or similar).
+   Connection: click "Add", paste your Gemini API key there. Prompt —
+   combine three things into the message you send Gemini:
+   - A system instruction: *"You are Signalvest's advisor. You explain the
+     mechanical scores and signals you're given below in plain language.
+     You NEVER invent your own buy/sell opinion — if the data doesn't
+     support an answer, say so. Keep replies under 150 words."*
+   - The JSON from step 2's HTTP response (map the HTTP module's Body
+     output into the prompt).
+   - The Telegram message text from step 1 (map the Telegram module's
+     Text output in) — this is the actual question.
+
+4. **Add a second Telegram Bot module** ("Send a Message"). Chat ID: map
+   in the Chat ID from step 1's trigger (so it replies to whoever asked).
+   Text: map in Gemini's response text from step 3.
+
+5. Turn the scenario **ON** (top-left toggle), then test it by messaging
+   your bot "why Maybank?" (or whatever's currently in your `Signals` tab).
+
+That's the whole build — 4 modules, no code. If a reply looks wrong,
+check the HTTP module's output first (Make.com's history view shows every
+module's input/output per run) — most issues are the Apps Script URL,
+secret, or a `Signals` tab that hasn't been populated yet (run
+`scripts/check-signals.mjs` once, or wait for its next scheduled run).
+
+**Cost**: Make's free tier (1,000 operations/month) comfortably covers a
+few conversations a week — this scenario uses ~4 operations per question.
+Gemini's free tier is enough too, since it only ever sees the pre-filtered
+data your engine already computed, not the full stock universe.
+
+**On RM figures in replies**: unlike the scheduled Action's Telegram
+messages (which never state RM totals or share counts, because GitHub
+Actions logs on this public repo are public too), this conversational bot
+*can* include real RM figures if you want — it's a private Telegram DM you
+initiate, same as the browser app being your own private session. If you'd
+rather it stay as redacted as the scheduled alerts, add that instruction to
+the Gemini system prompt in step 3.
 
 ## The stock universe
 
