@@ -215,13 +215,29 @@ Two new `doGet`/`doPost` actions in `apps-script/Code.gs` (added by
   full results (ticker, signal, trend, RSI, price, and — for BUY candidates
   you don't already hold — score/entry/stop/target/R:R/positives/risks).
   It's a snapshot of "latest known state," not a growing log.
-- **`context`** (GET) — one call that bundles `Signals` + `Holdings` +
-  cash available + your `Config` (risk limits, strategy weights) into a
-  single JSON response, so the Make.com scenario only needs one HTTP
-  request per question instead of four.
+- **`writeRiskStatus`** (POST) — same script, same run, overwriting the
+  single `Risk Status` row: whether you're currently loss-limit-paused (and
+  why), portfolio heat %, largest sector concentration, and any holding
+  with no stop set. This is the same money-management data the scheduled
+  alerts already compute (Phase 1's position sizing/heat/loss-limit work) —
+  now made queryable on demand instead of only pushed as a one-off message.
+- **`context`** (GET) — one call that bundles `Signals` + `Risk Status` +
+  `Holdings` + cash available + your `Config` (risk limits, strategy
+  weights) into a single JSON response, so the Make.com scenario only needs
+  one HTTP request per question instead of five.
 
-Both need `migrateSchemaV2` to have been run at least once (for the
-`Signals` tab to exist) — safe to re-run if you're not sure.
+All three need `migrateSchemaV2` to have been run at least once (for the
+`Signals` and `Risk Status` tabs to exist) — safe to re-run if you're not
+sure.
+
+**Why this matters for the bot specifically**: without `Risk Status` in the
+bundle, the Telegram advisor could describe a BUY signal's score/entry/stop
+perfectly correctly while having no idea you'd already hit your daily loss
+limit, or that your portfolio is already above your heat comfort threshold
+— it would be technically right about the stock and wrong about whether
+you should be trading at all right now. The system prompt in step 3 below
+tells Gemini to check `riskStatus.tradingPaused` first, every time, before
+discussing any new position.
 
 ### Setting up the Make.com scenario
 
@@ -246,12 +262,23 @@ a chat with an AI assistant, a support ticket, or anywhere else.**
 3. **Add a Google Gemini module** ("Create a Completion" or similar).
    Connection: click "Add", paste your Gemini API key there. Prompt —
    combine three things into the message you send Gemini:
-   - A system instruction: *"You are Signalvest's advisor. You explain the
-     mechanical scores and signals you're given below in plain language.
-     You NEVER invent your own buy/sell opinion — if the data doesn't
-     support an answer, say so. Keep replies under 150 words."*
+   - A system instruction: *"You are Signalvest's advisor and money-
+     management gatekeeper. You explain the mechanical scores and signals
+     you're given below in plain language. You NEVER invent your own
+     buy/sell opinion — if the data doesn't support an answer, say so.
+     Before discussing ANY new position, check riskStatus.tradingPaused
+     in the data first: if true, tell the user they've hit a loss limit
+     (state pausedReason) and that no new positions should be opened
+     until it lifts — say this even if they didn't ask about risk, and
+     even if a stock has a strong BUY score. Separately, if
+     riskStatus.portfolioHeatPct is at or above
+     riskStatus.heatComfortThresholdPct, mention that their portfolio is
+     already at or above their comfort threshold for capital at risk
+     before suggesting they add a new position. Keep replies under 150
+     words unless a pause or heat warning needs more."*
    - The JSON from step 2's HTTP response (map the HTTP module's Body
-     output into the prompt).
+     output into the prompt) — this now includes `riskStatus` alongside
+     `signals`, so the check above always has real data to look at.
    - The Telegram message text from step 1 (map the Telegram module's
      Text output in) — this is the actual question.
 

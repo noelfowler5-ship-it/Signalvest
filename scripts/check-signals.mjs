@@ -245,6 +245,24 @@ async function postSignals(signals) {
   }
 }
 
+// Overwrites the Sheet's Risk Status row — the money-management state (loss-
+// limit pause, portfolio heat) the Telegram/Gemini bot checks before ever
+// discussing a new BUY, same data the scheduled alerts already compute, just
+// made queryable on demand. RM figures never leave this call — everything
+// here is a percentage or yes/no, same privacy rule as the rest of this file.
+async function postRiskStatus(riskStatus) {
+  if (!SHEET_ENDPOINT || !SHEET_SECRET) return;
+  try {
+    await fetch(SHEET_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secret: SHEET_SECRET, action: "writeRiskStatus", riskStatus, generatedAt: new Date().toISOString() })
+    });
+  } catch {
+    // best-effort — a missed write just leaves the bot's context stale until the next run
+  }
+}
+
 async function loadState() {
   try {
     const s = JSON.parse(await readFile(STATE_PATH, "utf8"));
@@ -471,17 +489,28 @@ async function main() {
   }
 
   // --- Loss limits / trading pause ---------------------------------------
+  const breachedWindows = ["daily", "weekly", "monthly"].filter(w => lossLimits[w].breached);
   let limitAlert = null;
   if (lossLimits.paused !== prevState.paused) {
-    if (lossLimits.paused) {
-      const breachedWindows = ["daily", "weekly", "monthly"].filter(w => lossLimits[w].breached);
-      limitAlert = `🔴 *TRADING PAUSED*\n${breachedWindows.map(w => `${w} loss limit: ${lossLimits[w].pctUsed.toFixed(0)}% used`).join("\n")}\nThis is a behavioural check only — nothing here blocks your broker.`;
-    } else {
-      limitAlert = `🟢 Loss-limit pause lifted — back within your daily/weekly/monthly limits.`;
-    }
+    limitAlert = lossLimits.paused
+      ? `🔴 *TRADING PAUSED*\n${breachedWindows.map(w => `${w} loss limit: ${lossLimits[w].pctUsed.toFixed(0)}% used`).join("\n")}\nThis is a behavioural check only — nothing here blocks your broker.`
+      : `🟢 Loss-limit pause lifted — back within your daily/weekly/monthly limits.`;
   }
 
   await postSignals(signalRows);
+
+  await postRiskStatus({
+    tradingPaused: lossLimits.paused,
+    pausedReason: breachedWindows.length ? `${breachedWindows.join(", ")} loss limit reached` : "",
+    portfolioHeatPct: heat ? heat.portfolioHeatPct : null,
+    heatComfortThresholdPct: PORTFOLIO_HEAT_LIMIT_PCT,
+    largestSector: heat && heat.largestSector ? heat.largestSector.sector : null,
+    largestSectorPct: heat && heat.largestSector ? heat.largestSector.pct : null,
+    unquantifiedRiskPositions: heat ? heat.unquantifiedRiskPositions : [],
+    dailyLossPctUsed: lossLimits.daily.pctUsed,
+    weeklyLossPctUsed: lossLimits.weekly.pctUsed,
+    monthlyLossPctUsed: lossLimits.monthly.pctUsed
+  });
 
   const sections = [];
   if (regimeAlert) sections.push(regimeAlert);

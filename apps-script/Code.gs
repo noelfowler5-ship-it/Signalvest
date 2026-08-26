@@ -35,8 +35,20 @@ const SHEET_NAMES = {
   CORPORATE_ACTIONS: "Corporate Actions",
   AUDIT_LOG: "Audit Log",
   SNAPSHOTS: "Snapshots",
-  SIGNALS: "Signals"
+  SIGNALS: "Signals",
+  RISK_STATUS: "Risk Status"
 };
+
+// Risk Status tab columns — a SINGLE row (row 2), fully OVERWRITTEN on every
+// scanner run. This is the money-management state the Telegram/Gemini bot
+// checks before ever discussing a new BUY: loss-limit pause and portfolio
+// heat, the same numbers the scheduled Action already alerts on, just made
+// queryable on demand instead of only pushed as one-off Telegram messages.
+const RISK_STATUS_HEADERS = [
+  "Trading Paused", "Paused Reason", "Portfolio Heat %", "Heat Comfort Threshold %",
+  "Largest Sector", "Largest Sector %", "Unquantified Risk Positions",
+  "Daily Loss % Used", "Weekly Loss % Used", "Monthly Loss % Used", "Updated At"
+];
 
 // Signals tab columns — one row per ticker, fully OVERWRITTEN on every scanner
 // run (unlike every other tab here, this is a "latest known state" cache, not
@@ -189,8 +201,9 @@ function migrateSchemaV2() {
   ensureTab(SHEET_NAMES.AUDIT_LOG, ["Timestamp", "Event", "Detail", "Old Value", "New Value", "Source"]);
   ensureTab(SHEET_NAMES.SNAPSHOTS, ["Date", "Time", "Portfolio Value (RM)", "Cash (RM)", "Invested Capital (RM)", "Source"]);
   ensureTab(SHEET_NAMES.SIGNALS, SIGNALS_HEADERS);
+  ensureTab(SHEET_NAMES.RISK_STATUS, RISK_STATUS_HEADERS);
 
-  ss.toast("Schema V2 migration complete: Transactions extended with 10 new columns (H:Q), 5 new tabs created. No existing data was modified.");
+  ss.toast("Schema V2 migration complete: Transactions extended with 10 new columns (H:Q), 6 new tabs created. No existing data was modified.");
 }
 
 /**
@@ -457,13 +470,43 @@ function doGet(e) {
     }
     return json_({
       signals: readSignals_(ss),
+      riskStatus: readRiskStatus_(ss),
       holdings: holdRows.map(r => ({ ticker: r[0], qty: r[1], avgCost: r[2] })),
       cashAvailable,
       config
     });
   }
 
+  if (action === "riskStatus") {
+    return json_({ riskStatus: readRiskStatus_(ss) });
+  }
+
   return json_({ error: "unknown action" });
+}
+
+// Shared reader for the Risk Status tab (a single row) — used by both the
+// `riskStatus` and `context` actions above. Returns null if the tab doesn't
+// exist yet (pre-migration) or has never been written to (Action hasn't run
+// since the upgrade) — callers should treat null as "status unknown", not
+// "everything is fine".
+function readRiskStatus_(ss) {
+  const sh = ss.getSheetByName(SHEET_NAMES.RISK_STATUS);
+  if (!sh || sh.getLastRow() < 2) return null;
+  const r = sh.getRange(2, 1, 1, RISK_STATUS_HEADERS.length).getValues()[0];
+  if (!r[10]) return null; // "Updated At" blank — never actually written
+  return {
+    tradingPaused: r[0] === true || r[0] === "TRUE",
+    pausedReason: r[1] || "",
+    portfolioHeatPct: r[2] === "" ? null : r[2],
+    heatComfortThresholdPct: r[3] === "" ? null : r[3],
+    largestSector: r[4] || null,
+    largestSectorPct: r[5] === "" ? null : r[5],
+    unquantifiedRiskPositions: r[6] ? String(r[6]).split(" | ").filter(Boolean) : [],
+    dailyLossPctUsed: r[7] === "" ? null : r[7],
+    weeklyLossPctUsed: r[8] === "" ? null : r[8],
+    monthlyLossPctUsed: r[9] === "" ? null : r[9],
+    updatedAt: r[10] instanceof Date ? r[10].toISOString() : r[10]
+  };
 }
 
 // Shared reader for the Signals tab — used by both the `signals` and
@@ -521,6 +564,28 @@ function doPost(e) {
       sh.getRange(2, 1, rows.length, SIGNALS_HEADERS.length).setValues(rows);
     }
     return json_({ ok: true, count: list.length });
+  }
+
+  // Called by scripts/check-signals.mjs at the end of every scan. Overwrites
+  // the single Risk Status row with this run's loss-limit/portfolio-heat
+  // state — the money-management numbers the Telegram/Gemini bot checks
+  // before ever discussing a new BUY, so it can say "you're paused" or
+  // "you're already at high heat" instead of only reacting to price signals.
+  if (body.action === "writeRiskStatus") {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sh = ss.getSheetByName(SHEET_NAMES.RISK_STATUS);
+    if (!sh) return json_({ error: "Risk Status tab not found — run migrateSchemaV2 first" });
+    const s = body.riskStatus || {};
+    sh.getRange(2, 1, 1, RISK_STATUS_HEADERS.length).setValues([[
+      s.tradingPaused ? "TRUE" : "FALSE", s.pausedReason || "",
+      s.portfolioHeatPct != null ? s.portfolioHeatPct : "", s.heatComfortThresholdPct != null ? s.heatComfortThresholdPct : "",
+      s.largestSector || "", s.largestSectorPct != null ? s.largestSectorPct : "",
+      Array.isArray(s.unquantifiedRiskPositions) ? s.unquantifiedRiskPositions.join(" | ") : "",
+      s.dailyLossPctUsed != null ? s.dailyLossPctUsed : "", s.weeklyLossPctUsed != null ? s.weeklyLossPctUsed : "",
+      s.monthlyLossPctUsed != null ? s.monthlyLossPctUsed : "",
+      body.generatedAt || new Date().toISOString()
+    ]]);
+    return json_({ ok: true });
   }
 
   return json_({ error: "unknown action" });
