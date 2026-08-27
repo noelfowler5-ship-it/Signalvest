@@ -339,6 +339,7 @@ let state = {
 
 const TOP_CANDIDATES = 3; // you can only realistically act on 1-2 picks at RM800 budget; don't pretend otherwise
 const COOLDOWN_DAYS = 30; // flag re-buying/re-selling something you just traded — fee drag matters more at small size
+const MIN_BUY_SCORE_PCT = 0.8; // only surface BUY candidates scoring 80%+ of max — 8/10 on the default weights
 
 /* ---------- tabs ---------- */
 document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => {
@@ -561,19 +562,40 @@ async function runScreener() {
   }
   renderRegimeBox();
 
+  const investedCapital = state.lastHoldings.reduce((s, h) => s + (Number(h.qty) || 0) * (Number(h.avgCost) || 0), 0);
+  const portfolioValue = cash + investedCapital;
+  const maxScore = maxPossibleScore(state.strategy.weights);
+  // "8 and above" scaled against the CURRENT max score — default weights sum
+  // to 10, so this is literally 8/10 out of the box, and stays meaningful if
+  // you ever change the strategy weights in Settings.
+  const minBuyScore = maxScore * MIN_BUY_SCORE_PCT;
+
   // Held positions: always show, you need to monitor what you actually own.
   const heldRows = rows.filter(r => r.isPinned);
-  // New candidates: don't pretend a RM800 budget can act on 20 names — surface
-  // only the strongest few BUY signals (ranked by trend confirmation), same
-  // spirit as "you can only really hold 1-2 positions, so stop browsing".
-  const buyCandidates = rows.filter(r => !r.isPinned && r.signal === "BUY")
-    .sort((a, b) => b.trendStrength - a.trendStrength);
+
+  // New candidates: score every BUY signal first (not just the top few by
+  // trend), then only surface ones that actually clear your score bar — a
+  // strong trend on a weak overall score isn't worth your attention. Ranked
+  // by score, not trend strength, since score is now what gates them.
+  const scoredBuyRows = rows.filter(r => !r.isPinned && r.signal === "BUY").map(r => {
+    const base = scoreCandidate({
+      hist: r.hist, cls: r, avgVol20: r.avgVol20,
+      regime: state.lastRegime ? state.lastRegime.regime : "NEUTRAL",
+      fundamentals: null, // never fabricated — you verify this yourself via the link below
+      strategy: state.strategy
+    });
+    const ets = computeEntryStopTarget({ currentPrice: r.price, highs: r.hist.map(h => h.high), lows: r.hist.map(h => h.low), closes: r.hist.map(h => h.close) });
+    const sizing = ets ? computePositionSize({ portfolioValue, maxRiskPct: state.riskLimits.maxRiskPct, entry: r.price, stop: ets.stop, cash, target: ets.target }) : null;
+    const card = ets ? buildDecisionCard({ ticker: r.code, name: r.name, currentPrice: r.price, base, entryStopTarget: ets, positionSizing: sizing, strategy: state.strategy }) : null;
+    return { ...r, card };
+  });
+  const buyCandidates = scoredBuyRows
+    .filter(r => r.card && r.card.score >= minBuyScore)
+    .sort((a, b) => b.card.score - a.card.score);
   const topCandidates = buyCandidates.slice(0, TOP_CANDIDATES);
   const shown = [...heldRows, ...topCandidates];
 
   const now = Date.now();
-  const investedCapital = state.lastHoldings.reduce((s, h) => s + (Number(h.qty) || 0) * (Number(h.avgCost) || 0), 0);
-  const portfolioValue = cash + investedCapital;
 
   for (const r of shown) {
     const rt = state.recentTrades[r.code.toUpperCase()];
@@ -585,19 +607,7 @@ async function runScreener() {
         : `<span class="muted">${days}d ago</span>`;
     }
 
-    let card = null;
-    if (!r.isPinned && r.signal === "BUY") {
-      const base = scoreCandidate({
-        hist: r.hist, cls: r, avgVol20: r.avgVol20,
-        regime: state.lastRegime ? state.lastRegime.regime : "NEUTRAL",
-        fundamentals: null, // never fabricated — you verify this yourself via the link below
-        strategy: state.strategy
-      });
-      const ets = computeEntryStopTarget({ currentPrice: r.price, highs: r.hist.map(h => h.high), lows: r.hist.map(h => h.low), closes: r.hist.map(h => h.close) });
-      const sizing = ets ? computePositionSize({ portfolioValue, maxRiskPct: state.riskLimits.maxRiskPct, entry: r.price, stop: ets.stop, cash, target: ets.target }) : null;
-      if (ets) card = buildDecisionCard({ ticker: r.code, name: r.name, currentPrice: r.price, base, entryStopTarget: ets, positionSizing: sizing, strategy: state.strategy });
-    }
-    const maxScore = maxPossibleScore(state.strategy.weights);
+    const card = r.card || null; // held rows never carry a card — r.card is undefined for those
     const bucket = classifyBucket({ score: card ? card.score : 0, maxScore, signal: r.signal, fitsBudget: r.fitsBudget, liquid: r.liquid });
 
     const tr = document.createElement("tr");
@@ -644,7 +654,9 @@ async function runScreener() {
       });
     }
   }
-  status.textContent = `Top ${topCandidates.length} new candidate(s) shown (of ${buyCandidates.length} BUY signal(s) among ${universe.length} screened) + ${heldRows.length} held position(s). Not financial advice.`;
+  status.textContent = buyCandidates.length
+    ? `Top ${topCandidates.length} new candidate(s) shown — score ${minBuyScore.toFixed(0)}+/${maxScore.toFixed(0)} (${buyCandidates.length} qualified of ${scoredBuyRows.length} BUY signal(s) among ${universe.length} screened) + ${heldRows.length} held position(s). Not financial advice.`
+    : `No BUY candidates scored ${minBuyScore.toFixed(0)}/${maxScore.toFixed(0)} or higher this run (${scoredBuyRows.length} BUY signal(s) scored, none qualified) + ${heldRows.length} held position(s). Not financial advice.`;
   btn.disabled = false;
 }
 document.getElementById("runScreen").addEventListener("click", runScreener);
