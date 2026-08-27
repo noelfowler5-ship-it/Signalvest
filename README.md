@@ -99,14 +99,24 @@ the scheduled Telegram checks).
 ## What's in the app
 
 - **Screener**: your held positions + top 3 new BUY candidates that fit
-  your budget. Each new candidate expands into a full decision card: score
-  (out of your configured weights), entry/stop/target, risk:reward,
-  position sizing, plain-English positives and risks, and an invalidation
-  line — never a bare "BUY". **Approve/Watch/Reject** only records your
-  decision (Audit Log) — it never places an order. A market-regime banner
-  (RISK_ON/NEUTRAL/RISK_OFF, from real KLCI history + this run's breadth)
-  sits above the table, always labelled as a description of current
-  conditions, never a prediction.
+  your budget **and score at least 80% of the max (8/10 on the default
+  weights)** — a strong trend on a weak overall score no longer takes one
+  of the 3 slots; if nothing clears the bar you get a clear "no BUY
+  candidates qualified" status instead of a mediocre pick. Each candidate
+  expands into a full decision card: score (out of your configured
+  weights), entry/stop/target, risk:reward, position sizing, plain-English
+  positives and risks, and an invalidation line — never a bare "BUY".
+  **Approve/Watch/Reject** only records your decision (Audit Log) — it
+  never places an order. A market-regime banner (RISK_ON/NEUTRAL/RISK_OFF,
+  from real KLCI history + this run's breadth) sits above the table,
+  always labelled as a description of current conditions, never a
+  prediction. **Runs automatically** the first time you open the app each
+  day (no need to tap "Run screener") and caches that result in your
+  browser so reopening later the same day is instant — tap "Run screener"
+  anytime for a live re-check. Auto-running on *every* open (rather than
+  once/day) was deliberately not done: the scan checks ~67 tickers through
+  free public CORS proxies with no uptime guarantee, so hammering them on
+  every app open risks getting rate-limited.
 - **Portfolio**: log a trade (Buy/Sell, with optional setup/emotion/
   thesis/rule-followed detail), import a Moomoo CSV, see holdings, ATR-based
   stop-loss guidance, a **reconciliation panel** that compares what the CSV

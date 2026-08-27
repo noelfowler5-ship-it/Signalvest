@@ -501,13 +501,13 @@ function sectorFor(code) {
 }
 
 /* ---------- screener + decision engine + market regime ---------- */
+const SCREENER_CACHE_KEY = "sv_screener_cache"; // one day's results, restored on reopen — see tryRestoreScreenerCache()
+
 async function runScreener() {
   const btn = document.getElementById("runScreen");
   const status = document.getElementById("screenStatus");
   btn.disabled = true;
   status.innerHTML = '<span class="spinner"></span> loading universe...';
-  const resultsBody = document.getElementById("resultsBody");
-  resultsBody.innerHTML = "";
   document.getElementById("resultsPanel").style.display = "block";
 
   let universe;
@@ -593,8 +593,54 @@ async function runScreener() {
     .filter(r => r.card && r.card.score >= minBuyScore)
     .sort((a, b) => b.card.score - a.card.score);
   const topCandidates = buyCandidates.slice(0, TOP_CANDIDATES);
-  const shown = [...heldRows, ...topCandidates];
 
+  renderScreenerResults({
+    heldRows, topCandidates,
+    buyCandidatesCount: buyCandidates.length, scoredBuyRowsCount: scoredBuyRows.length,
+    universeLength: universe.length, minBuyScore, maxScore
+  });
+
+  // Cache today's results (regime + rendered rows, price history stripped)
+  // so reopening the app later the same day restores instantly instead of
+  // re-running the full ~universe.length-ticker scan again — see
+  // tryRestoreScreenerCache() at startup. This is a snapshot of THIS run,
+  // not live: cash/holdings changes after this point won't show up until
+  // the next real run (manual click, or tomorrow's auto-run).
+  try {
+    localStorage.setItem(SCREENER_CACHE_KEY, JSON.stringify({
+      date: new Date().toDateString(),
+      heldRows: heldRows.map(stripHistForCache),
+      topCandidates: topCandidates.map(stripHistForCache),
+      buyCandidatesCount: buyCandidates.length, scoredBuyRowsCount: scoredBuyRows.length,
+      universeLength: universe.length, minBuyScore, maxScore,
+      regime: state.lastRegime
+    }));
+  } catch (e) {
+    // localStorage full/blocked — caching is a nice-to-have, never fatal
+  }
+
+  btn.disabled = false;
+}
+document.getElementById("runScreen").addEventListener("click", runScreener);
+
+// Strips the bulky price-history array before caching a row — never needed
+// again once its score/card has already been computed from it.
+function stripHistForCache(r) {
+  const { hist, ...rest } = r;
+  return rest;
+}
+
+// Renders the results table + decision cards from already-computed rows —
+// shared by a fresh runScreener() and a same-day cache restore below, so
+// both paths produce identical, fully-interactive output (Approve/Watch/
+// Reject buttons included), not just a static snapshot.
+function renderScreenerResults({ heldRows, topCandidates, buyCandidatesCount, scoredBuyRowsCount, universeLength, minBuyScore, maxScore }) {
+  const status = document.getElementById("screenStatus");
+  const resultsBody = document.getElementById("resultsBody");
+  resultsBody.innerHTML = "";
+  document.getElementById("resultsPanel").style.display = "block";
+
+  const shown = [...heldRows, ...topCandidates];
   const now = Date.now();
 
   for (const r of shown) {
@@ -654,12 +700,27 @@ async function runScreener() {
       });
     }
   }
-  status.textContent = buyCandidates.length
-    ? `Top ${topCandidates.length} new candidate(s) shown — score ${minBuyScore.toFixed(0)}+/${maxScore.toFixed(0)} (${buyCandidates.length} qualified of ${scoredBuyRows.length} BUY signal(s) among ${universe.length} screened) + ${heldRows.length} held position(s). Not financial advice.`
-    : `No BUY candidates scored ${minBuyScore.toFixed(0)}/${maxScore.toFixed(0)} or higher this run (${scoredBuyRows.length} BUY signal(s) scored, none qualified) + ${heldRows.length} held position(s). Not financial advice.`;
-  btn.disabled = false;
+  status.textContent = buyCandidatesCount
+    ? `Top ${topCandidates.length} new candidate(s) shown — score ${minBuyScore.toFixed(0)}+/${maxScore.toFixed(0)} (${buyCandidatesCount} qualified of ${scoredBuyRowsCount} BUY signal(s) among ${universeLength} screened) + ${heldRows.length} held position(s). Not financial advice.`
+    : `No BUY candidates scored ${minBuyScore.toFixed(0)}/${maxScore.toFixed(0)} or higher this run (${scoredBuyRowsCount} BUY signal(s) scored, none qualified) + ${heldRows.length} held position(s). Not financial advice.`;
 }
-document.getElementById("runScreen").addEventListener("click", runScreener);
+
+// Restores today's cached screener results (if any) without re-fetching —
+// called once at startup so opening the app again the same day is instant
+// instead of re-running the full scan. Returns true if a same-day cache was
+// found and rendered; the caller falls back to a real runScreener() run
+// otherwise (first open of the day, or the cache was cleared/unreadable).
+function tryRestoreScreenerCache() {
+  let cache;
+  try { cache = JSON.parse(localStorage.getItem(SCREENER_CACHE_KEY) || "null"); }
+  catch (e) { cache = null; }
+  if (!cache || cache.date !== new Date().toDateString()) return false;
+  state.lastRegime = cache.regime;
+  renderRegimeBox();
+  renderScreenerResults(cache);
+  document.getElementById("screenStatus").textContent += " (cached from earlier today — tap Run screener to re-check live prices)";
+  return true;
+}
 
 function decisionCardHtml(card) {
   const positives = card.positives.map(p => `<div class="why">✓ ${p}</div>`).join("");
@@ -1260,10 +1321,14 @@ function renderReconciliation(fills) {
 }
 
 /* ---------- startup ---------- */
-loadHoldings();
-loadRecentTrades();
-loadConfigAndLedger();
 loadCorporateActions();
+Promise.all([loadHoldings(), loadRecentTrades(), loadConfigAndLedger()]).then(() => {
+  // Auto-screen once per day: restore this morning's results instantly if
+  // we already ran today, otherwise do one real (live) run. Either way you
+  // never need to tap "Run screener" just to see today's picks — the
+  // button is still there whenever you want an explicit live re-check.
+  if (!tryRestoreScreenerCache()) runScreener();
+});
 </script>
 </body>
 </html>
