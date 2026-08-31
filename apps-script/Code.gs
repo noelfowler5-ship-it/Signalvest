@@ -171,8 +171,13 @@ function migrateSchemaV2() {
   const tx = ss.getSheetByName(SHEET_NAMES.TRANSACTIONS);
   if (!tx) throw new Error("Transactions tab not found — run setupSheet first.");
 
-  const currentLastCol = tx.getLastColumn();
-  if (currentLastCol < 8) {
+  // Gate on the actual V2 header ("Type" in H1), not on getLastColumn() — a
+  // sheet with any stray content anywhere at or past column H (a manual note,
+  // leftover formatting, an unrelated far-right column) would otherwise make
+  // getLastColumn() >= 8 look like "already migrated" and silently skip the
+  // whole Transactions upgrade with no headers, no backfill, and no error.
+  const alreadyMigrated = tx.getRange(1, 8).getValue() === TX_V2_HEADERS[0];
+  if (!alreadyMigrated) {
     tx.getRange(1, 8, 1, TX_V2_HEADERS.length).setValues([TX_V2_HEADERS]);
     const lastRow = tx.getLastRow();
     if (lastRow > 1) {

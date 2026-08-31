@@ -13,9 +13,61 @@
 - [x] Type backfilled from Side on existing rows
 - [x] 49+ tests passing (position-sizing, P/L math, portfolio heat, loss limits, decision scoring, backtest anti-lookahead, reconciliation, corporate actions)
 - [x] Signals tab + Risk Status row overwritten daily by GitHub Actions
+- [x] **`migrateSchemaV2` verified end-to-end (2026-08-31)** — see below
 
-**What's next** (Phase 2 completion):
-- [ ] Verify `migrateSchemaV2` works end-to-end on a fresh Google Sheet (test sheet)
+**Verification method (2026-08-31)**: this session had no Google Sheets/Apps Script
+execution access (only Drive file-level tools — no cell writes, no script
+execution). Verified instead by loading the *real, unmodified* `apps-script/Code.gs`
+into a Node.js mock of the `SpreadsheetApp`/`PropertiesService` APIs and executing
+the actual `migrateSchemaV2`/`setupSheet` functions against simulated spreadsheet
+state (fresh + populated-V1 fixtures, plus targeted edge cases). This runs the
+production code, not a reimplementation, so it catches real logic bugs — but it
+is not literally Google's servers, so Sheets-API-specific runtime quirks can't
+be ruled out. Script used: throwaway, not committed (ephemeral scratchpad).
+
+**Result — fresh/blank sheet**: PASS.
+- `migrateSchemaV2` alone on a truly blank spreadsheet (no `Transactions` tab)
+  throws a clear `"Transactions tab not found — run setupSheet first."` error
+  and creates no partial state — correct guarded behavior, not a bug.
+- The real new-user path, `setupSheet()` then `migrateSchemaV2()`, creates all
+  10 expected tabs (Transactions, Holdings, Budget, Net Worth, Config, Corporate
+  Actions, Audit Log, Snapshots, Signals, Risk Status) with headers matching the
+  spec exactly, Transactions A:Q in the correct order, and Config seeded with
+  all 12 `DEFAULT_CONFIG` rows.
+
+**Result — copy of a populated V1 sheet**: PASS, after one fix.
+- Transactions A:G existing rows preserved byte-for-byte (no data loss, no row
+  loss), H:Q headers appended in the correct order, `Type` backfilled from
+  `Side` for every existing row (including a non-Buy/Sell "Dividend" row),
+  columns I:Q correctly left blank rather than fabricated. Holdings/Budget/Net
+  Worth tabs untouched. Running it a second time (idempotency) does not
+  duplicate columns/tabs and does not clobber a user-edited Config value or
+  existing Audit Log rows.
+- **Bug found and fixed**: the original gate `if (tx.getLastColumn() < 8)`
+  decided "already migrated" by column count alone. Any real sheet with stray
+  content anywhere at or past column H — a manual note, leftover formatting,
+  an unrelated column far to the right — would trip that gate and **silently
+  skip the entire Transactions upgrade** (no new headers, no `Type` backfill,
+  no error, no toast warning). Fixed in `apps-script/Code.gs` to gate on
+  whether `H1` actually equals `"Type"` (the real V2 marker) instead of on
+  `getLastColumn()`. Re-verified: V2 headers now install correctly even with
+  stray content in H1 or in a far-right column, and the idempotency case above
+  still passes (second run correctly detects "already migrated" and no-ops).
+- Full existing suite (`node --test test/*.test.mjs`, 49 tests) still passes
+  after the fix — unaffected, since it doesn't touch `lib/*.js`.
+
+**Safe to run against the real production sheet?** Yes, with one caveat: this
+was verified via a faithful mock of the Apps Script runtime, not literally
+executed against Google's servers, because this session had no Sheets/Apps
+Script API access. The logic itself (column placement, backfill, tab creation,
+idempotency, and the column-H edge case) is now verified correct. Recommend
+still running it first against a throwaway **copy** of the real sheet in the
+actual Apps Script editor before running on production, purely to rule out any
+Sheets-API-specific behavior (quota, locking, actual `getLastColumn()`
+semantics on a real sheet) that a mock can't reproduce — not because a logic
+bug is expected.
+
+**What's next** (Phase 2 completion — separate sessions):
 - [ ] Audit Log: verify append-only constraint (no overwrites, no deletes)
 - [ ] Snapshots tab: confirm daily portfolio value is being written
 - [ ] Config tab: verify decision weights + risk limits sync to browser Settings tab
