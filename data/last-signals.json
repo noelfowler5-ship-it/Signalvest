@@ -14,7 +14,7 @@
     "4863.KL": "BUY",
     "4677.KL": "BUY",
     "6742.KL": "HOLD",
-    "5183.KL": "BUY",
+    "5183.KL": "HOLD",
     "3816.KL": "BUY",
     "7293.KL": "BUY",
     "5141.KL": "AVOID",
@@ -29,7 +29,7 @@
     "4197.KL": "HOLD",
     "3182.KL": "AVOID",
     "4715.KL": "AVOID",
-    "7084.KL": "HOLD",
+    "7084.KL": "BUY",
     "5296.KL": "HOLD",
     "7052.KL": "HOLD",
     "5398.KL": "BUY",
@@ -55,7 +55,7 @@
     "0036.KL": "AVOID"
   },
   "stops": {
-    "5218.KL": "near"
+    "5218.KL": "trailing"
   },
   "regime": "RISK_ON",
   "heatBreach": false,
