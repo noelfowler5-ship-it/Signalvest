@@ -86,7 +86,7 @@
     <div id="regimeBox"></div>
     <div class="panel" id="resultsPanel" style="display:none">
       <table>
-        <thead><tr><th>Ticker</th><th>Price (RM)</th><th>Trend</th><th>RSI14</th><th>Signal</th><th>Bucket</th><th>100-lot cost</th><th>Fits budget</th><th>Last traded</th><th>Fundamentals</th></tr></thead>
+        <thead><tr><th>Ticker</th><th>Price</th><th>Trend</th><th>RSI14</th><th>Signal</th><th>Bucket</th><th>Lot cost</th><th>Fits budget</th><th>Last traded</th><th>Fundamentals</th></tr></thead>
         <tbody id="resultsBody"></tbody>
       </table>
     </div>
@@ -225,6 +225,10 @@
         scheduled Telegram alerts stay in sync too. No need to edit the Sheet's Budget tab by hand.
       </div>
       <div id="cashSyncStatus" class="muted" style="font-size:12px;margin-top:4px"></div>
+      <hr style="margin:12px 0;border:none;border-top:1px solid #eee">
+      <label>Cash available to invest this cycle (USD) — separate pool for universe-us.json, never blended with the RM figure above</label>
+      <input id="cashInputUS" type="number" step="0.01" style="width:160px">
+      <div id="cashSyncStatusUS" class="muted" style="font-size:12px;margin-top:4px"></div>
     </div>
 
     <div class="panel">
@@ -302,6 +306,7 @@
 import { reduceLedger } from "./lib/ledger.js";
 import { computePositionSize, computePortfolioHeat, evaluateLossLimits } from "./lib/risk.js";
 import { scoreCandidate, computeEntryStopTarget, buildDecisionCard, classifyBucket } from "./lib/decision.js";
+import { latestBreakoutSignal } from "./lib/backtest.js";
 import { classifyRegime } from "./lib/regime.js";
 import { cloneStrategy, DEFAULT_STRATEGY, maxPossibleScore } from "./lib/strategy.js";
 import { reconcileHoldings } from "./lib/reconcile.js";
@@ -310,6 +315,7 @@ import { computeBehaviorStats } from "./lib/journal.js";
 /* ---------- storage ---------- */
 const LS = {
   cash: "sv_cash",
+  cashUS: "sv_cash_us",
   pinned: "sv_pinned",
   sheetUrl: "sv_sheet_url",
   sheetSecret: "sv_sheet_secret",
@@ -320,6 +326,7 @@ const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
 
 let state = {
   cash: load(LS.cash, 0),
+  cashUS: load(LS.cashUS, 0), // SEPARATE USD pool — never blended with `cash`, no FX conversion anywhere in this file
   pinned: load(LS.pinned, []),
   sheetUrl: load(LS.sheetUrl, ""),
   sheetSecret: load(LS.sheetSecret, ""),
@@ -500,6 +507,20 @@ function sectorFor(code) {
   return u?.sector || "Unclassified";
 }
 
+// Board-lot size by market: Bursa Malaysia trades in 100-share lots; US
+// equities trade in single shares. A universe entry with no `market` field
+// (every current universe.json entry, and every held ticker not found in
+// universe-us.json) defaults to KLSE — existing behaviour is unchanged.
+function lotSizeFor(stock) {
+  return stock.market === "US" ? 1 : 100;
+}
+
+// Currency symbol for display — SEPARATE pools, never blended (no FX
+// conversion anywhere in this file). Pass the same `stock`/row shape used above.
+function curSym(stock) {
+  return stock.market === "US" ? "$" : "RM";
+}
+
 /* ---------- screener + decision engine + market regime ---------- */
 const SCREENER_CACHE_KEY = "sv_screener_cache"; // one day's results, restored on reopen — see tryRestoreScreenerCache()
 
@@ -513,18 +534,32 @@ async function runScreener() {
   let universe;
   try {
     universe = await (await fetch("universe.json")).json();
-    state.universe = universe;
   } catch (e) {
     status.textContent = "Could not load universe.json";
     btn.disabled = false;
     return;
   }
+  let universeUS = [];
+  try {
+    universeUS = await (await fetch("universe-us.json")).json();
+  } catch (e) {
+    // optional — US screening just doesn't run this pass
+  }
+  const usTickerSet = new Set(universeUS.map(u => u.code.toUpperCase()));
+  universe.push(...universeUS);
+  state.universe = universe;
+
   const pinnedSet = new Set(state.pinned.map(t => t.toUpperCase()));
   for (const t of pinnedSet) {
-    if (!universe.find(u => u.code.toUpperCase() === t)) universe.push({ code: t, name: t, sector: "Unclassified" });
+    if (!universe.find(u => u.code.toUpperCase() === t)) {
+      const market = usTickerSet.has(t) ? "US" : undefined;
+      universe.push({ code: t, name: t, sector: "Unclassified", ...(market ? { market } : {}) });
+    }
   }
 
   const cash = Number(state.cash) || 0;
+  const cashUS = Number(state.cashUS) || 0; // SEPARATE pool — never blended with `cash`, see lotSizeFor()/curSym() above
+  function cashFor(stock) { return stock.market === "US" ? cashUS : cash; }
   let done = 0, upCount = 0, classifiedCount = 0;
   const rows = [];
   for (const stock of universe) {
@@ -538,10 +573,10 @@ async function runScreener() {
       classifiedCount++;
       if (cls.trend === "up") upCount++;
       const price = closes[closes.length - 1];
-      const lotCost = price * 100;
+      const lotCost = price * lotSizeFor(stock);
       const isPinned = pinnedSet.has(stock.code.toUpperCase());
       const liquid = avgVol20 >= 50000; // liquidity floor; adjust in universe.json curation if needed
-      const fitsBudget = lotCost <= cash;
+      const fitsBudget = lotCost <= cashFor(stock);
       if (!isPinned && !liquid) continue; // skip illiquid names unless you're already tracking them
       if (!isPinned && !fitsBudget) continue; // pure screener: only surface what you could actually buy a lot of
       const trendStrength = (cls.sma20 - cls.sma50) / cls.sma50; // proxy for conviction, not a quality judgement
@@ -562,8 +597,16 @@ async function runScreener() {
   }
   renderRegimeBox();
 
-  const investedCapital = state.lastHoldings.reduce((s, h) => s + (Number(h.qty) || 0) * (Number(h.avgCost) || 0), 0);
+  // Invested capital, split by pool — mixing RM and USD cost bases into one
+  // number would be meaningless without an FX rate, which this app
+  // deliberately doesn't have. Portfolio heat (risk tab) stays RM-only.
+  const investedCapital = state.lastHoldings.filter(h => !usTickerSet.has(String(h.ticker).toUpperCase()))
+    .reduce((s, h) => s + (Number(h.qty) || 0) * (Number(h.avgCost) || 0), 0);
+  const investedCapitalUS = state.lastHoldings.filter(h => usTickerSet.has(String(h.ticker).toUpperCase()))
+    .reduce((s, h) => s + (Number(h.qty) || 0) * (Number(h.avgCost) || 0), 0);
   const portfolioValue = cash + investedCapital;
+  const portfolioValueUS = cashUS + investedCapitalUS;
+  function portfolioValueFor(stock) { return stock.market === "US" ? portfolioValueUS : portfolioValue; }
   const maxScore = maxPossibleScore(state.strategy.weights);
   // "8 and above" scaled against the CURRENT max score — default weights sum
   // to 10, so this is literally 8/10 out of the box, and stays meaningful if
@@ -582,11 +625,12 @@ async function runScreener() {
       hist: r.hist, cls: r, avgVol20: r.avgVol20,
       regime: state.lastRegime ? state.lastRegime.regime : "NEUTRAL",
       fundamentals: null, // never fabricated — you verify this yourself via the link below
-      strategy: state.strategy
+      strategy: state.strategy,
+      breakout: latestBreakoutSignal(r.hist) // independent 20d-high+volume check, not scored — see lib/decision.js
     });
     const ets = computeEntryStopTarget({ currentPrice: r.price, highs: r.hist.map(h => h.high), lows: r.hist.map(h => h.low), closes: r.hist.map(h => h.close) });
-    const sizing = ets ? computePositionSize({ portfolioValue, maxRiskPct: state.riskLimits.maxRiskPct, entry: r.price, stop: ets.stop, cash, target: ets.target }) : null;
-    const card = ets ? buildDecisionCard({ ticker: r.code, name: r.name, currentPrice: r.price, base, entryStopTarget: ets, positionSizing: sizing, strategy: state.strategy }) : null;
+    const sizing = ets ? computePositionSize({ portfolioValue: portfolioValueFor(r), maxRiskPct: state.riskLimits.maxRiskPct, entry: r.price, stop: ets.stop, cash: cashFor(r), target: ets.target, lotSize: lotSizeFor(r) }) : null;
+    const card = ets ? { ...buildDecisionCard({ ticker: r.code, name: r.name, currentPrice: r.price, base, entryStopTarget: ets, positionSizing: sizing, strategy: state.strategy }), currencySymbol: curSym(r) } : null;
     return { ...r, card };
   });
   const buyCandidates = scoredBuyRows
@@ -659,12 +703,12 @@ function renderScreenerResults({ heldRows, topCandidates, buyCandidatesCount, sc
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td class="${card ? "clickable" : ""}" data-role="tickerCell">${r.code}${r.isPinned ? ' <span class="muted">(held)</span>' : ""}<br><span class="muted">${r.name}</span></td>
-      <td>${r.price.toFixed(3)}</td>
+      <td>${curSym(r)} ${r.price.toFixed(3)}</td>
       <td>${r.trend}</td>
       <td>${r.rsi.toFixed(1)}</td>
       <td><span class="pill ${r.signal}">${r.signal}</span></td>
       <td><span class="pill ${bucket}">${bucket}</span></td>
-      <td>RM ${r.lotCost.toFixed(2)}</td>
+      <td>${curSym(r)} ${r.lotCost.toFixed(2)}</td>
       <td>${r.fitsBudget ? "yes" : "no"}</td>
       <td>${lastTradedHtml}</td>
       <td style="font-size:12px">${fundamentalsLinkHtml(r.code)}</td>`;
@@ -732,8 +776,8 @@ function decisionCardHtml(card) {
     <div class="decisionCard">
       <div><b>${card.ticker}</b> — Score ${card.score.toFixed(0)}/${card.maxScore.toFixed(0)} · Strategy v${card.strategyVersion}</div>
       <div style="margin:6px 0">
-        Entry RM${card.entry[0].toFixed(3)}–${card.entry[1].toFixed(3)} ·
-        Stop RM${card.stop.toFixed(3)} · Target RM${card.target.toFixed(3)} · R:R ${card.rr.toFixed(1)}
+        Entry ${card.currencySymbol}${card.entry[0].toFixed(3)}–${card.entry[1].toFixed(3)} ·
+        Stop ${card.currencySymbol}${card.stop.toFixed(3)} · Target ${card.currencySymbol}${card.target.toFixed(3)} · R:R ${card.rr.toFixed(1)}
       </div>
       <div class="muted" style="margin-bottom:6px">${sizingLine}</div>
       ${positives}${risks}
@@ -758,9 +802,13 @@ function renderRegimeBox() {
 /* ---------- settings ---------- */
 function renderSettings() {
   document.getElementById("cashInput").value = state.cash || "";
+  document.getElementById("cashInputUS").value = state.cashUS || "";
   document.getElementById("sheetUrl").value = state.sheetUrl || "";
   document.getElementById("sheetSecret").value = state.sheetSecret || "";
-  document.getElementById("cashHeader").textContent = state.cash ? `Budget: RM ${Number(state.cash).toFixed(2)}` : "";
+  const headerParts = [];
+  if (state.cash) headerParts.push(`RM ${Number(state.cash).toFixed(2)}`);
+  if (state.cashUS) headerParts.push(`$${Number(state.cashUS).toFixed(2)}`);
+  document.getElementById("cashHeader").textContent = headerParts.length ? `Budget: ${headerParts.join(" · ")}` : "";
   updateSheetDebug();
   updateHealthBox();
   const pinList = document.getElementById("pinList");
@@ -844,6 +892,19 @@ document.getElementById("cashInput").addEventListener("change", async e => {
     }
   }
 });
+document.getElementById("cashInputUS").addEventListener("change", async e => {
+  state.cashUS = Number(e.target.value) || 0;
+  save(LS.cashUS, state.cashUS);
+  renderSettings();
+  if (state.sheetUrl) {
+    try {
+      await sheetPost({ action: "setBudgetUS", cash: state.cashUS });
+      document.getElementById("cashSyncStatusUS").textContent = "Synced to Sheet.";
+    } catch (err) {
+      document.getElementById("cashSyncStatusUS").textContent = "Saved locally, but Sheet sync failed: " + err.message;
+    }
+  }
+});
 document.getElementById("pinAdd").addEventListener("click", () => {
   const v = document.getElementById("pinInput").value.trim();
   if (!v) return;
@@ -865,6 +926,9 @@ document.getElementById("saveSheet").addEventListener("click", async () => {
   // leave the Sheet holding whatever was last typed there by hand.
   if (state.sheetUrl && state.cash) {
     try { await sheetPost({ action: "setBudget", cash: state.cash }); } catch (err) { /* non-fatal — next cash edit will retry */ }
+  }
+  if (state.sheetUrl && state.cashUS) {
+    try { await sheetPost({ action: "setBudgetUS", cash: state.cashUS }); } catch (err) { /* non-fatal — next cash edit will retry */ }
   }
 });
 
@@ -1009,32 +1073,45 @@ async function renderStopLevels(holdings) {
     renderRiskTab();
     return;
   }
+  // Portfolio heat is an RM-only metric today (no FX rate to blend a USD
+  // holding's risk into one number) — held US positions are identified here
+  // so they can be excluded below rather than silently counted as zero risk.
+  let usTickerSet = new Set();
+  try {
+    const universeUS = await (await fetch("universe-us.json")).json();
+    usTickerSet = new Set(universeUS.map(u => u.code.toUpperCase()));
+  } catch (e) { /* optional file — heat calc just treats every holding as RM */ }
+
   box.innerHTML = '<span class="spinner"></span> computing stop levels...';
   const lines = [];
   const heatHoldings = [];
   for (const h of holdings) {
+    const isUS = usTickerSet.has(String(h.ticker).toUpperCase());
+    const sym = isUS ? "$" : "RM";
     try {
       const hist = await fetchHistory(h.ticker);
       const info = computeStopInfo(hist, Number(h.avgCost));
-      heatHoldings.push({
-        ticker: h.ticker, qty: Number(h.qty), avgCost: Number(h.avgCost),
-        currentPrice: info ? info.currentPrice : Number(h.avgCost),
-        stopPrice: info ? info.operative : null, sector: sectorFor(h.ticker)
-      });
+      if (!isUS) {
+        heatHoldings.push({
+          ticker: h.ticker, qty: Number(h.qty), avgCost: Number(h.avgCost),
+          currentPrice: info ? info.currentPrice : Number(h.avgCost),
+          stopPrice: info ? info.operative : null, sector: sectorFor(h.ticker)
+        });
+      }
       if (!info) { lines.push(`<div>${h.ticker} — <span class="muted">not enough price history yet</span></div>`); continue; }
       const [pillClass, pillLabel] = STOP_PILL[info.state];
       const pill = pillClass ? `<span class="pill ${pillClass}">${pillLabel}</span>` : `<span class="muted">${pillLabel}</span>`;
       const trailNote = info.state === "trailing" || info.state === "near" || info.state === "breached"
-        ? ` (trailing, was hard stop RM${info.hardStop.toFixed(3)})` : "";
+        ? ` (trailing, was hard stop ${sym}${info.hardStop.toFixed(3)})` : "";
       lines.push(`
         <div style="padding:6px 0;border-bottom:1px solid var(--border)">
-          <div>${h.ticker} — RM${info.currentPrice.toFixed(3)} ${pill}</div>
-          <div class="muted" style="font-size:12px">avg cost RM${Number(h.avgCost).toFixed(3)} · stop RM${info.operative.toFixed(3)}${trailNote}</div>
+          <div>${h.ticker} — ${sym}${info.currentPrice.toFixed(3)} ${pill}${isUS ? ' <span class="muted">(USD — excluded from RM portfolio heat below)</span>' : ""}</div>
+          <div class="muted" style="font-size:12px">avg cost ${sym}${Number(h.avgCost).toFixed(3)} · stop ${sym}${info.operative.toFixed(3)}${trailNote}</div>
           <div style="font-size:12px;margin-top:2px">${fundamentalsLinkHtml(h.ticker)}</div>
         </div>`);
     } catch (e) {
       lines.push(`<div>${h.ticker} — <span class="muted">could not fetch price</span></div>`);
-      heatHoldings.push({ ticker: h.ticker, qty: Number(h.qty), avgCost: Number(h.avgCost), currentPrice: Number(h.avgCost), stopPrice: null, sector: sectorFor(h.ticker) });
+      if (!isUS) heatHoldings.push({ ticker: h.ticker, qty: Number(h.qty), avgCost: Number(h.avgCost), currentPrice: Number(h.avgCost), stopPrice: null, sector: sectorFor(h.ticker) });
     }
   }
   box.innerHTML = lines.join("");

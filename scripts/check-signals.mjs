@@ -22,8 +22,9 @@ import path from "node:path";
 import { reduceLedger } from "../lib/ledger.js";
 import { computePositionSize, computePortfolioHeat, evaluateLossLimits } from "../lib/risk.js";
 import { scoreCandidate, computeEntryStopTarget, buildDecisionCard } from "../lib/decision.js";
+import { latestBreakoutSignal } from "../lib/backtest.js";
 import { classifyRegime } from "../lib/regime.js";
-import { cloneStrategy, DEFAULT_STRATEGY } from "../lib/strategy.js";
+import { cloneStrategy, DEFAULT_STRATEGY, maxPossibleScore } from "../lib/strategy.js";
 
 const {
   TELEGRAM_BOT_TOKEN,
@@ -35,6 +36,7 @@ const {
 const STATE_PATH = path.join(process.cwd(), "data", "last-signals.json");
 const COOLDOWN_DAYS = 30; // matches index.html — flag churn instead of nudging a fresh trade right after one
 const PORTFOLIO_HEAT_LIMIT_PCT = 6; // alert when total capital-at-risk crosses this
+const MIN_BUY_SCORE_PCT = 0.8; // matches index.html — only alert BUY candidates scoring 80%+ of max (8/10 on default weights)
 
 async function fetchJSON(url, opts) {
   const r = await fetch(url, opts);
@@ -176,6 +178,18 @@ async function getCashAvailable() {
   }
 }
 
+// SEPARATE USD pool — never blended with the RM figure above. Only used for
+// universe-us.json candidates; see lotSizeFor()/cashFor() below.
+async function getCashAvailableUS() {
+  if (!SHEET_ENDPOINT || !SHEET_SECRET) return null;
+  try {
+    const data = await fetchJSON(`${SHEET_ENDPOINT}?secret=${encodeURIComponent(SHEET_SECRET)}&action=budgetUS`);
+    return typeof data.cashAvailableUS === "number" ? data.cashAvailableUS : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getRecentTrades() {
   if (!SHEET_ENDPOINT || !SHEET_SECRET) return {};
   try {
@@ -266,9 +280,9 @@ async function postRiskStatus(riskStatus) {
 async function loadState() {
   try {
     const s = JSON.parse(await readFile(STATE_PATH, "utf8"));
-    return { signals: s.signals || {}, stops: s.stops || {}, regime: s.regime || null, heatBreach: !!s.heatBreach, paused: !!s.paused };
+    return { signals: s.signals || {}, stops: s.stops || {}, qualified: s.qualified || {}, regime: s.regime || null, heatBreach: !!s.heatBreach, paused: !!s.paused };
   } catch {
-    return { signals: {}, stops: {}, regime: null, heatBreach: false, paused: false };
+    return { signals: {}, stops: {}, qualified: {}, regime: null, heatBreach: false, paused: false };
   }
 }
 
@@ -294,10 +308,34 @@ function sectorFor(universe, code) {
   return u?.sector || "Unclassified";
 }
 
+// Board-lot size by market: Bursa Malaysia trades in 100-share lots; US
+// equities trade in single shares. A universe entry with no `market` field
+// (every current universe.json entry, and every held ticker not found in
+// universe-us.json) defaults to KLSE — existing behaviour is unchanged.
+function lotSizeFor(stock) {
+  return stock.market === "US" ? 1 : 100;
+}
+
+// Currency symbol for messages/logs — SEPARATE pools, never blended (no FX
+// conversion anywhere in this file). Pass the SAME `stock` shape used above.
+function curSym(stock) {
+  return stock.market === "US" ? "$" : "RM";
+}
+
 async function main() {
   const universe = JSON.parse(await readFile(path.join(process.cwd(), "universe.json"), "utf8"));
+  let universeUS = [];
+  try {
+    universeUS = JSON.parse(await readFile(path.join(process.cwd(), "universe-us.json"), "utf8"));
+  } catch {
+    // file missing is fine — US screening just doesn't run this cycle
+  }
+  const usTickerSet = new Set(universeUS.map(u => u.code.toUpperCase()));
+  universe.push(...universeUS);
+
   const holdings = await getHoldings();
-  const cash = await getCashAvailable(); // used only for a yes/no fit check + internal risk math, never logged/messaged as RM
+  const cash = await getCashAvailable(); // RM pool — used only for a yes/no fit check + internal risk math, never logged/messaged
+  const cashUS = await getCashAvailableUS(); // SEPARATE USD pool — never blended with `cash` above
   const recentTrades = await getRecentTrades(); // ticker -> {date, side}, for the cooldown note below
   const configRaw = await getConfig();
   const strategy = cloneStrategy(DEFAULT_STRATEGY, {
@@ -310,6 +348,7 @@ async function main() {
     }
   });
   const maxRiskPct = Number(configRaw.maxRiskPct) || 1;
+  const minBuyScore = maxPossibleScore(strategy.weights) * MIN_BUY_SCORE_PCT;
 
   const rawTransactions = await getTransactions();
   const { realizedTrades } = reduceLedger(rawTransactions);
@@ -322,12 +361,29 @@ async function main() {
   const avgCostByTicker = new Map(holdings.map(h => [h.ticker.toUpperCase(), Number(h.avgCost)]));
   const qtyByTicker = new Map(holdings.map(h => [h.ticker.toUpperCase(), Number(h.qty)]));
   for (const h of holdings) {
-    if (!universe.find(u => u.code.toUpperCase() === h.ticker.toUpperCase())) universe.push({ code: h.ticker, name: h.ticker, sector: "Unclassified" });
+    if (!universe.find(u => u.code.toUpperCase() === h.ticker.toUpperCase())) {
+      const market = usTickerSet.has(h.ticker.toUpperCase()) ? "US" : undefined;
+      universe.push({ code: h.ticker, name: h.ticker, sector: "Unclassified", ...(market ? { market } : {}) });
+    }
+  }
+
+  // Invested capital, split by pool — mixing RM and USD cost bases into one
+  // number would be meaningless without an FX rate, which this project
+  // deliberately doesn't have. Used for position sizing below; portfolio
+  // heat (RM-only for now) is handled separately further down.
+  const investedCapitalRM = holdings.filter(h => !usTickerSet.has(h.ticker.toUpperCase()))
+    .reduce((s, h) => s + (Number(h.qty) || 0) * (Number(h.avgCost) || 0), 0);
+  const investedCapitalUS = holdings.filter(h => usTickerSet.has(h.ticker.toUpperCase()))
+    .reduce((s, h) => s + (Number(h.qty) || 0) * (Number(h.avgCost) || 0), 0);
+  function cashFor(stock) { return stock.market === "US" ? cashUS : cash; }
+  function portfolioValueFor(stock) {
+    return stock.market === "US" ? (cashUS != null ? cashUS + investedCapitalUS : null) : (cash != null ? cash + investedCapitalRM : null);
   }
 
   const prevState = await loadState();
   const nextSignals = {};
   const nextStops = {};
+  const nextQualified = {};
   const changes = [];
   const stopAlerts = [];
   const heatHoldings = []; // for computePortfolioHeat, accumulated as we go
@@ -359,16 +415,22 @@ async function main() {
       const avgCost = avgCostByTicker.get(stock.code.toUpperCase());
       const qty = qtyByTicker.get(stock.code.toUpperCase()) || 0;
       const info = avgCost != null ? computeStopInfo(hist, avgCost) : null;
-      heatHoldings.push({
-        ticker: stock.code, qty, avgCost, currentPrice: price,
-        stopPrice: info ? info.operative : null, sector: sectorFor(universe, stock.code)
-      });
+      // Portfolio heat is an RM-only metric today (no FX rate to blend a USD
+      // holding's risk into one number) — a held US position is excluded
+      // here rather than silently counted as zero risk. See README.
+      if (stock.market !== "US") {
+        heatHoldings.push({
+          ticker: stock.code, qty, avgCost, currentPrice: price,
+          stopPrice: info ? info.operative : null, sector: sectorFor(universe, stock.code)
+        });
+      }
     }
 
     if (!isHeld && !liquid) continue;
 
-    const fitsBudget = cash == null ? null : price * 100 <= cash;
-    if (!isHeld && cash != null && fitsBudget === false) continue;
+    const stockCash = cashFor(stock);
+    const fitsBudget = stockCash == null ? null : price * lotSizeFor(stock) <= stockCash;
+    if (!isHeld && stockCash != null && fitsBudget === false) continue;
 
     nextSignals[stock.code] = cls.signal;
 
@@ -381,13 +443,13 @@ async function main() {
         hist, cls, avgVol20,
         regime: prevState.regime || "NEUTRAL", // best available at scoring time; the regime section below reports the current one
         fundamentals: null, // never fabricated — Node has no way to verify this
-        strategy
+        strategy,
+        breakout: latestBreakoutSignal(hist) // independent 20d-high+volume check, not scored — see lib/decision.js
       });
       const ets = computeEntryStopTarget({ currentPrice: price, highs: hist.map(h => h.high), lows: hist.map(h => h.low), closes });
-      if (cash != null && ets) {
-        const investedCapital = holdings.reduce((s, h) => s + (Number(h.qty) || 0) * (avgCostByTicker.get(h.ticker.toUpperCase()) || 0), 0);
-        const portfolioValue = cash + investedCapital;
-        sizing = computePositionSize({ portfolioValue, maxRiskPct, entry: price, stop: ets.stop, cash, target: ets.target });
+      const portfolioValue = portfolioValueFor(stock);
+      if (stockCash != null && portfolioValue != null && ets) {
+        sizing = computePositionSize({ portfolioValue, maxRiskPct, entry: price, stop: ets.stop, cash: stockCash, target: ets.target, lotSize: lotSizeFor(stock) });
       }
       if (ets) card = buildDecisionCard({ ticker: stock.code, name: stock.name, currentPrice: price, base, entryStopTarget: ets, positionSizing: sizing, strategy });
     }
@@ -401,40 +463,56 @@ async function main() {
     });
 
     const prevSignal = prevState.signals[stock.code];
-    if (prevSignal !== cls.signal) {
-      const fitLine = fitsBudget == null ? "" : `\nFits your current budget: ${fitsBudget ? "yes" : "no"}`;
-      const rt = recentTrades[stock.code.toUpperCase()];
-      let cooldownLine = "";
-      if (rt) {
-        const days = Math.floor((Date.now() - new Date(rt.date).getTime()) / 86400000);
-        if (days < COOLDOWN_DAYS) cooldownLine = `\n⚠️ You ${rt.side.toLowerCase()}ed this ${days}d ago — mind fee drag before trading again`;
-      }
 
-      // Decision-engine card lines for a fresh, non-held BUY signal — the
-      // richer "signal card" format from the spec. Skipped for HOLD/AVOID
-      // changes and for held tickers (those already get stop-level guidance
-      // below). `card`/`sizing` were already computed above.
-      let decisionLines = "";
-      if (card) {
+    if (isHeld) {
+      // Held positions: a trend/signal flip is worth flagging regardless of
+      // score — you already own it, this isn't a new-entry decision. Stop
+      // levels are handled separately below.
+      if (prevSignal !== cls.signal) {
+        changes.push(
+          `*${stock.code}* (${stock.name}) — held\n` +
+          `${prevSignal ? prevSignal + " → " : ""}*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · ${curSym(stock)}${price.toFixed(3)}`
+        );
+      }
+    } else {
+      // New candidates only ever get a full trading-plan alert once they clear
+      // your quality bar (score >= 8/10 by default) — matches index.html's
+      // screener filter, so Telegram/the bot never surfaces a weak BUY.
+      const qualifies = cls.signal === "BUY" && card && card.score >= minBuyScore;
+      const prevQualified = !!prevState.qualified[stock.code];
+      nextQualified[stock.code] = qualifies;
+
+      if (qualifies && !prevQualified) {
+        const fitLine = fitsBudget == null ? "" : `\nFits your current budget: ${fitsBudget ? "yes" : "no"}`;
+        const rt = recentTrades[stock.code.toUpperCase()];
+        let cooldownLine = "";
+        if (rt) {
+          const days = Math.floor((Date.now() - new Date(rt.date).getTime()) / 86400000);
+          if (days < COOLDOWN_DAYS) cooldownLine = `\n⚠️ You ${rt.side.toLowerCase()}ed this ${days}d ago — mind fee drag before trading again`;
+        }
+
         const topPositives = card.positives.slice(0, 3).map(p => `✓ ${p}`).join("\n");
         const topRisks = card.risks.slice(0, 2).map(r => `⚠ ${r}`).join("\n");
-        decisionLines =
+        const sym = curSym(stock);
+        const decisionLines =
           `\nScore: ${card.score.toFixed(0)}/${card.maxScore.toFixed(0)}` +
-          `\nEntry: RM${card.entry[0].toFixed(3)}–${card.entry[1].toFixed(3)}` +
-          `\nStop: RM${card.stop.toFixed(3)}` +
-          `\nTarget: RM${card.target.toFixed(3)}` +
+          `\nEntry: ${sym}${card.entry[0].toFixed(3)}–${card.entry[1].toFixed(3)}` +
+          `\nStop: ${sym}${card.stop.toFixed(3)}` +
+          `\nTarget: ${sym}${card.target.toFixed(3)}` +
           `\nR:R: ${card.rr.toFixed(1)}` +
           (sizing && sizing.valid && sizing.portfolioRiskPct != null ? `\nPortfolio risk: ${sizing.portfolioRiskPct.toFixed(1)}%` : "") +
           (topPositives ? `\n${topPositives}` : "") +
           (topRisks ? `\n${topRisks}` : "") +
           `\n${card.invalidation}` +
           `\n_Not an execution order._`;
-      }
 
-      changes.push(
-        `*${stock.code}* (${stock.name})${isHeld ? " — held" : ""}\n` +
-        `${prevSignal ? prevSignal + " → " : ""}*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · RM${price.toFixed(3)}${fitLine}${cooldownLine}${decisionLines}`
-      );
+        changes.push(
+          `*${stock.code}* (${stock.name}) — *TRADING PLAN*\n` +
+          `*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · ${sym}${price.toFixed(3)}${fitLine}${cooldownLine}${decisionLines}`
+        );
+      } else if (!qualifies && prevQualified) {
+        changes.push(`*${stock.code}* (${stock.name}) dropped below your ${(MIN_BUY_SCORE_PCT * 10).toFixed(0)}/10 bar — no longer an active candidate.`);
+      }
     }
 
     // Stop-loss / trailing-stop: only meaningful for positions you actually hold.
@@ -445,11 +523,12 @@ async function main() {
         nextStops[stock.code] = info.state;
         const prevStopState = prevState.stops[stock.code];
         if (prevStopState !== info.state) {
+          const sym = curSym(stock);
           const labels = {
-            breached: `🔴 stop level breached — RM${info.operative.toFixed(3)}. This is where a disciplined exit would trigger.`,
-            near: `🟡 within 3% of your stop level (RM${info.operative.toFixed(3)}). Watch closely.`,
-            trailing: `🟢 up enough to switch to a trailing stop — new stop RM${info.operative.toFixed(3)} (was hard stop RM${info.hardStop.toFixed(3)}).`,
-            initial: `ℹ️ hard stop-loss suggested at RM${info.hardStop.toFixed(3)} (2×ATR below your average cost).`
+            breached: `🔴 stop level breached — ${sym}${info.operative.toFixed(3)}. This is where a disciplined exit would trigger.`,
+            near: `🟡 within 3% of your stop level (${sym}${info.operative.toFixed(3)}). Watch closely.`,
+            trailing: `🟢 up enough to switch to a trailing stop — new stop ${sym}${info.operative.toFixed(3)} (was hard stop ${sym}${info.hardStop.toFixed(3)}).`,
+            initial: `ℹ️ hard stop-loss suggested at ${sym}${info.hardStop.toFixed(3)} (2×ATR below your average cost).`
           };
           stopAlerts.push(`*${stock.code}* (${stock.name})\n${labels[info.state]}`);
         }
@@ -527,7 +606,7 @@ async function main() {
   }
 
   await saveState({
-    signals: nextSignals, stops: nextStops,
+    signals: nextSignals, stops: nextStops, qualified: nextQualified,
     regime: regime ? regime.regime : prevState.regime,
     heatBreach: heat ? heat.portfolioHeatPct >= PORTFOLIO_HEAT_LIMIT_PCT : prevState.heatBreach,
     paused: lossLimits.paused
