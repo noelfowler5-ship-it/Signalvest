@@ -20,6 +20,51 @@ test("scoreCandidate: bullish setup scores positively with matching reasons", ()
   assert.ok(positives.some(p => p.includes("regime: risk-on")));
 });
 
+test("scoreCandidate: breakout confirmation is surfaced as a positive but never changes the score", () => {
+  const args = {
+    hist: [{ close: 1, high: 1, low: 1, volume: 0 }],
+    cls: { trend: "flat", rsi: 50, sma20: 1, sma50: 1 },
+    avgVol20: 0,
+    regime: "NEUTRAL",
+    fundamentals: null,
+    strategy: DEFAULT_STRATEGY
+  };
+  const without = scoreCandidate(args);
+  const withConfirm = scoreCandidate({ ...args, breakout: { signal: "BUY" } });
+  assert.equal(withConfirm.score, without.score); // deliberately not scored
+  assert.ok(withConfirm.positives.some(p => p.includes("Breakout confirmation")));
+  assert.equal(without.positives.some(p => p.includes("Breakout")), false);
+});
+
+test("scoreCandidate: breakout disagreement is surfaced as a risk but never changes the score", () => {
+  const args = {
+    hist: [{ close: 1, high: 1, low: 1, volume: 0 }],
+    cls: { trend: "up", rsi: 55, sma20: 2, sma50: 1 },
+    avgVol20: 0,
+    regime: "NEUTRAL",
+    fundamentals: null,
+    strategy: DEFAULT_STRATEGY
+  };
+  const without = scoreCandidate(args);
+  const withDisagree = scoreCandidate({ ...args, breakout: { signal: "AVOID" } });
+  assert.equal(withDisagree.score, without.score);
+  assert.ok(withDisagree.risks.some(r => r.includes("Breakout check disagrees")));
+});
+
+test("scoreCandidate: missing breakout data (not enough history) adds no line either way", () => {
+  const { positives, risks } = scoreCandidate({
+    hist: [{ close: 1, high: 1, low: 1, volume: 0 }],
+    cls: { trend: "flat", rsi: 50, sma20: 1, sma50: 1 },
+    avgVol20: 0,
+    regime: "NEUTRAL",
+    fundamentals: null,
+    strategy: DEFAULT_STRATEGY,
+    breakout: null
+  });
+  assert.equal(positives.some(p => p.includes("Breakout")), false);
+  assert.equal(risks.some(r => r.includes("Breakout")), false);
+});
+
 test("scoreCandidate: never scores fundamentals when unverified, and says so", () => {
   const { risks } = scoreCandidate({
     hist: [{ close: 1, high: 1, low: 1, volume: 0 }],

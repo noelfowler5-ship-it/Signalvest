@@ -22,6 +22,7 @@ import path from "node:path";
 import { reduceLedger } from "../lib/ledger.js";
 import { computePositionSize, computePortfolioHeat, evaluateLossLimits } from "../lib/risk.js";
 import { scoreCandidate, computeEntryStopTarget, buildDecisionCard } from "../lib/decision.js";
+import { latestBreakoutSignal } from "../lib/backtest.js";
 import { classifyRegime } from "../lib/regime.js";
 import { cloneStrategy, DEFAULT_STRATEGY, maxPossibleScore } from "../lib/strategy.js";
 
@@ -295,6 +296,19 @@ function sectorFor(universe, code) {
   return u?.sector || "Unclassified";
 }
 
+// Board-lot size by market: Bursa Malaysia trades in 100-share lots; US
+// equities trade in single shares. A universe entry with no `market` field
+// (every current universe.json entry) defaults to "KLSE" — existing
+// behaviour is unchanged. DO NOT point this at a universe entry whose
+// `currency` isn't the same as `cash` below — `cash` comes from the Sheet's
+// single Budget figure (RM today) and there is no FX conversion anywhere in
+// this file. Scanning a USD-priced universe against an RM cash figure would
+// silently produce a wrong fitsBudget/position-size — that wiring is
+// intentionally NOT done yet; see universe-us.json's header comment.
+function lotSizeFor(stock) {
+  return stock.market === "US" ? 1 : 100;
+}
+
 async function main() {
   const universe = JSON.parse(await readFile(path.join(process.cwd(), "universe.json"), "utf8"));
   const holdings = await getHoldings();
@@ -370,7 +384,7 @@ async function main() {
 
     if (!isHeld && !liquid) continue;
 
-    const fitsBudget = cash == null ? null : price * 100 <= cash;
+    const fitsBudget = cash == null ? null : price * lotSizeFor(stock) <= cash;
     if (!isHeld && cash != null && fitsBudget === false) continue;
 
     nextSignals[stock.code] = cls.signal;
@@ -384,13 +398,14 @@ async function main() {
         hist, cls, avgVol20,
         regime: prevState.regime || "NEUTRAL", // best available at scoring time; the regime section below reports the current one
         fundamentals: null, // never fabricated — Node has no way to verify this
-        strategy
+        strategy,
+        breakout: latestBreakoutSignal(hist) // independent 20d-high+volume check, not scored — see lib/decision.js
       });
       const ets = computeEntryStopTarget({ currentPrice: price, highs: hist.map(h => h.high), lows: hist.map(h => h.low), closes });
       if (cash != null && ets) {
         const investedCapital = holdings.reduce((s, h) => s + (Number(h.qty) || 0) * (avgCostByTicker.get(h.ticker.toUpperCase()) || 0), 0);
         const portfolioValue = cash + investedCapital;
-        sizing = computePositionSize({ portfolioValue, maxRiskPct, entry: price, stop: ets.stop, cash, target: ets.target });
+        sizing = computePositionSize({ portfolioValue, maxRiskPct, entry: price, stop: ets.stop, cash, target: ets.target, lotSize: lotSizeFor(stock) });
       }
       if (ets) card = buildDecisionCard({ ticker: stock.code, name: stock.name, currentPrice: price, base, entryStopTarget: ets, positionSizing: sizing, strategy });
     }

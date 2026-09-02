@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runBacktest, summarizeBacktest, splitInOutSample } from "../lib/backtest.js";
+import { runBacktest, summarizeBacktest, splitInOutSample, breakoutVolumeSignals, latestBreakoutSignal } from "../lib/backtest.js";
 
 function bar(date, o, h, l, c, v = 100000) {
   return { date, open: o, high: h, low: l, close: c, volume: v };
@@ -83,6 +83,28 @@ test("summarizeBacktest computes win rate, profit factor and max drawdown correc
   assert.equal(s.profitFactor, 300 / 50);
   assert.ok(s.maxDrawdownPct > 0);
   assert.equal(s.finalEquity, 10300);
+});
+
+test("latestBreakoutSignal: null on empty bars, and matches the last entry of breakoutVolumeSignals otherwise", () => {
+  assert.equal(latestBreakoutSignal([]), null);
+  const bars = Array.from({ length: 25 }, (_, i) => bar(`d${i}`, 10, 10.5, 9.5, 10, 100000));
+  const series = breakoutVolumeSignals(bars);
+  assert.deepEqual(latestBreakoutSignal(bars), series[series.length - 1]);
+});
+
+test("latestBreakoutSignal: BUY when the latest close breaks the prior 20-session high on >=1.5x volume", () => {
+  // 20 flat prior sessions (high 10.5, avg volume 100000), then a breakout bar.
+  const priorBars = Array.from({ length: 20 }, (_, i) => bar(`d${i}`, 10, 10.5, 9.5, 10, 100000));
+  const breakoutBar = bar("d20", 11, 11.2, 10.8, 11, 200000); // closes above 10.5 on 2x volume
+  const signal = latestBreakoutSignal([...priorBars, breakoutBar]);
+  assert.equal(signal.signal, "BUY");
+});
+
+test("latestBreakoutSignal: AVOID once price closes back below the 20-session SMA", () => {
+  const priorBars = Array.from({ length: 20 }, (_, i) => bar(`d${i}`, 10, 10.5, 9.5, 10, 100000));
+  const dropBar = bar("d20", 8, 8.2, 7.8, 8, 100000); // well below the ~10 SMA20, no breakout
+  const signal = latestBreakoutSignal([...priorBars, dropBar]);
+  assert.equal(signal.signal, "AVOID");
 });
 
 test("splitInOutSample partitions strictly by date with no overlap", () => {

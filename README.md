@@ -107,10 +107,17 @@ the scheduled Telegram checks).
   weights), entry/stop/target, risk:reward, position sizing, plain-English
   positives and risks, and an invalidation line — never a bare "BUY".
   **Approve/Watch/Reject** only records your decision (Audit Log) — it
-  never places an order. A market-regime banner (RISK_ON/NEUTRAL/RISK_OFF,
-  from real KLCI history + this run's breadth) sits above the table,
-  always labelled as a description of current conditions, never a
-  prediction. **Runs automatically** the first time you open the app each
+  never places an order. Each card also runs an **independent breakout
+  check** (20-day-high close on ≥1.5x average volume, from
+  `lib/backtest.js`'s `latestBreakoutSignal`) alongside the SMA20/50+RSI14
+  trend signal — shown as an extra positive/risk line, deliberately **not
+  scored**, so it can't move the 8/10 bar. It's a second opinion for you to
+  read, not another way to pad the score; folding it into the weighted
+  score is a future strategy-version decision, not the default. A
+  market-regime banner (RISK_ON/NEUTRAL/RISK_OFF, from real KLCI history +
+  this run's breadth) sits above the table, always labelled as a
+  description of current conditions, never a prediction. **Runs
+  automatically** the first time you open the app each
   day (no need to tap "Run screener") and caches that result in your
   browser so reopening later the same day is instant — tap "Run screener"
   anytime for a live re-check. Auto-running on *every* open (rather than
@@ -337,8 +344,10 @@ rules, written twice on purpose — see "Why three copies" below):
 
 - **Liquidity filter**: skip anything averaging under 50,000 shares/day
   over the last 20 sessions, unless you already hold it.
-- **Budget filter**: skip anything where 100 shares (Bursa's board lot)
-  costs more than your available cash, unless you already hold it.
+- **Budget filter**: skip anything where one board lot costs more than
+  your available cash, unless you already hold it — 100 shares on Bursa,
+  1 share for a `"market": "US"` universe entry (see `lotSizeFor()` in
+  both `index.html` and `scripts/check-signals.mjs`).
 - **Signal rule**: SMA20 vs SMA50 for trend, RSI14 (Wilder) for
   overbought/oversold —
   - uptrend + RSI 35–68 → **BUY**
@@ -352,6 +361,39 @@ rules, written twice on purpose — see "Why three copies" below):
   are never fabricated: the score only counts that dimension if you've
   told it something via the fundamentals link, otherwise it's flagged
   "not verified" and excluded from the score.
+
+### `universe-us.json` — US-market expansion, staged but not live
+
+`universe-us.json` is a starter list of ~40 large-cap, highly liquid US
+tickers (no `.XX` suffix — Yahoo uses bare symbols for US-listed stocks),
+tagged `"market": "US", "currency": "USD"`. Same caveat as `universe.json`:
+picked from general knowledge, not a live index pull — verify before
+relying on it, and expect it to need edits over time same as the KLSE list.
+
+**It is deliberately not loaded anywhere yet.** Both `index.html`'s
+`runScreener()` and `scripts/check-signals.mjs`'s `main()` still only fetch
+`universe.json`. The reason: `cash` (from the Sheet's Budget tab) is a
+single RM figure with no FX conversion anywhere in this codebase. Scanning
+USD-priced tickers against an RM cash number would silently produce a wrong
+budget-fit check and a wrong position size — worse than not screening them
+at all. The board-lot math is already market-aware (`lotSizeFor()` returns
+1 for `"market": "US"`, 100 otherwise) and is exercised by the existing
+test suite, so that part is ready. What's still an open, undecided design
+question:
+
+- **Separate pool (recommended default)**: a second Sheet cell/column
+  ("Cash available (USD)") with its own `setBudgetUS`/`budgetUS`-style
+  Apps Script actions, its own position sizing and loss limits, reported
+  separately — never blended into one net-worth number. No new external
+  data dependency.
+- **Blended pool**: convert everything to one currency for a true combined
+  view, which means pulling a live FX rate from somewhere — a new data
+  dependency with its own uptime/accuracy risk, on top of the Yahoo/CORS
+  fragility already called out elsewhere in this README.
+
+Wiring `universe-us.json` into the live scan is the next real step once
+that's decided — it needs Apps Script/Sheet changes this repo alone can't
+make (the actual Sheet is private, per-user).
 
 ## Why three copies of the fetch/indicator logic
 
