@@ -345,9 +345,11 @@ rules, written twice on purpose — see "Why three copies" below):
 - **Liquidity filter**: skip anything averaging under 50,000 shares/day
   over the last 20 sessions, unless you already hold it.
 - **Budget filter**: skip anything where one board lot costs more than
-  your available cash, unless you already hold it — 100 shares on Bursa,
-  1 share for a `"market": "US"` universe entry (see `lotSizeFor()` in
-  both `index.html` and `scripts/check-signals.mjs`).
+  your available cash in that ticker's own pool, unless you already hold
+  it — 100 shares against your RM cash on Bursa, 1 share against your
+  SEPARATE USD cash for a `"market": "US"` universe entry (see
+  `lotSizeFor()`/`cashFor()` in both `index.html` and
+  `scripts/check-signals.mjs`, and the `universe-us.json` section below).
 - **Signal rule**: SMA20 vs SMA50 for trend, RSI14 (Wilder) for
   overbought/oversold —
   - uptrend + RSI 35–68 → **BUY**
@@ -362,7 +364,7 @@ rules, written twice on purpose — see "Why three copies" below):
   told it something via the fundamentals link, otherwise it's flagged
   "not verified" and excluded from the score.
 
-### `universe-us.json` — US-market expansion, staged but not live
+### `universe-us.json` — US-market expansion, a separate USD pool
 
 `universe-us.json` is a starter list of ~40 large-cap, highly liquid US
 tickers (no `.XX` suffix — Yahoo uses bare symbols for US-listed stocks),
@@ -370,30 +372,38 @@ tagged `"market": "US", "currency": "USD"`. Same caveat as `universe.json`:
 picked from general knowledge, not a live index pull — verify before
 relying on it, and expect it to need edits over time same as the KLSE list.
 
-**It is deliberately not loaded anywhere yet.** Both `index.html`'s
-`runScreener()` and `scripts/check-signals.mjs`'s `main()` still only fetch
-`universe.json`. The reason: `cash` (from the Sheet's Budget tab) is a
-single RM figure with no FX conversion anywhere in this codebase. Scanning
-USD-priced tickers against an RM cash number would silently produce a wrong
-budget-fit check and a wrong position size — worse than not screening them
-at all. The board-lot math is already market-aware (`lotSizeFor()` returns
-1 for `"market": "US"`, 100 otherwise) and is exercised by the existing
-test suite, so that part is ready. What's still an open, undecided design
-question:
+**It's live, backed by a second, wholly SEPARATE cash pool — never blended
+with the RM one.** There is no FX conversion anywhere in this codebase, so
+rather than convert everything to one currency (which would need a live FX
+rate — a new data dependency with its own uptime/accuracy risk, on top of
+the Yahoo/CORS fragility already called out elsewhere in this README), USD
+gets its own budget, its own position sizing, and its own budget-fit check,
+reported separately:
 
-- **Separate pool (recommended default)**: a second Sheet cell/column
-  ("Cash available (USD)") with its own `setBudgetUS`/`budgetUS`-style
-  Apps Script actions, its own position sizing and loss limits, reported
-  separately — never blended into one net-worth number. No new external
-  data dependency.
-- **Blended pool**: convert everything to one currency for a true combined
-  view, which means pulling a live FX rate from somewhere — a new data
-  dependency with its own uptime/accuracy risk, on top of the Yahoo/CORS
-  fragility already called out elsewhere in this README.
-
-Wiring `universe-us.json` into the live scan is the next real step once
-that's decided — it needs Apps Script/Sheet changes this repo alone can't
-make (the actual Sheet is private, per-user).
+- **Sheet**: the Budget tab has a second row, "Cash available to invest
+  (USD)" (cell B3), added by re-running `setupSheet` (safe, idempotent).
+  `doGet` gained `budgetUS`/`setBudgetUS` actions mirroring `budget`/
+  `setBudget` exactly, and `context` now also returns `cashAvailableUS`.
+- **Settings tab**: a second cash field under the RM one, synced to the
+  Sheet the same way (`setBudgetUS` instead of `setBudget`).
+- **Screener + scheduled Action**: both load `universe-us.json` alongside
+  `universe.json` and pick the right pool per ticker via `cashFor()`/
+  `portfolioValueFor()` (a US candidate's position sizing only ever sees
+  USD cash + USD invested capital, never RM). `lotSizeFor()` (1 share for
+  US, 100 for KLSE) and `curSym()`/`curSym(stock)` (`$` vs `RM`) make sure
+  every price, entry/stop/target, and Telegram message shows the right
+  currency.
+- **What's still RM-only, on purpose**: portfolio heat (Risk tab) and the
+  daily/weekly/monthly loss limits still only account for RM holdings — a
+  held US ticker is explicitly excluded from that calculation rather than
+  silently mixed in wrong, and is called out in the Risk tab's stop-level
+  list as "excluded from RM portfolio heat below". Extending heat/loss-
+  limits to be pool-aware (two separate heat numbers, two separate loss-
+  limit sets) is a reasonable next step but wasn't part of this change.
+  Likewise, the Transactions ledger's `Currency` column exists but
+  `lib/ledger.js` doesn't yet branch on it — logging a real USD trade won't
+  misprice anything you view directly, but it also won't feed correctly
+  into RM-denominated realized P&L/loss-limit math until that's addressed.
 
 ## Why three copies of the fetch/indicator logic
 

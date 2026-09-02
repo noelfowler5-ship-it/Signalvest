@@ -178,6 +178,18 @@ async function getCashAvailable() {
   }
 }
 
+// SEPARATE USD pool — never blended with the RM figure above. Only used for
+// universe-us.json candidates; see lotSizeFor()/cashFor() below.
+async function getCashAvailableUS() {
+  if (!SHEET_ENDPOINT || !SHEET_SECRET) return null;
+  try {
+    const data = await fetchJSON(`${SHEET_ENDPOINT}?secret=${encodeURIComponent(SHEET_SECRET)}&action=budgetUS`);
+    return typeof data.cashAvailableUS === "number" ? data.cashAvailableUS : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getRecentTrades() {
   if (!SHEET_ENDPOINT || !SHEET_SECRET) return {};
   try {
@@ -298,21 +310,32 @@ function sectorFor(universe, code) {
 
 // Board-lot size by market: Bursa Malaysia trades in 100-share lots; US
 // equities trade in single shares. A universe entry with no `market` field
-// (every current universe.json entry) defaults to "KLSE" — existing
-// behaviour is unchanged. DO NOT point this at a universe entry whose
-// `currency` isn't the same as `cash` below — `cash` comes from the Sheet's
-// single Budget figure (RM today) and there is no FX conversion anywhere in
-// this file. Scanning a USD-priced universe against an RM cash figure would
-// silently produce a wrong fitsBudget/position-size — that wiring is
-// intentionally NOT done yet; see universe-us.json's header comment.
+// (every current universe.json entry, and every held ticker not found in
+// universe-us.json) defaults to KLSE — existing behaviour is unchanged.
 function lotSizeFor(stock) {
   return stock.market === "US" ? 1 : 100;
 }
 
+// Currency symbol for messages/logs — SEPARATE pools, never blended (no FX
+// conversion anywhere in this file). Pass the SAME `stock` shape used above.
+function curSym(stock) {
+  return stock.market === "US" ? "$" : "RM";
+}
+
 async function main() {
   const universe = JSON.parse(await readFile(path.join(process.cwd(), "universe.json"), "utf8"));
+  let universeUS = [];
+  try {
+    universeUS = JSON.parse(await readFile(path.join(process.cwd(), "universe-us.json"), "utf8"));
+  } catch {
+    // file missing is fine — US screening just doesn't run this cycle
+  }
+  const usTickerSet = new Set(universeUS.map(u => u.code.toUpperCase()));
+  universe.push(...universeUS);
+
   const holdings = await getHoldings();
-  const cash = await getCashAvailable(); // used only for a yes/no fit check + internal risk math, never logged/messaged as RM
+  const cash = await getCashAvailable(); // RM pool — used only for a yes/no fit check + internal risk math, never logged/messaged
+  const cashUS = await getCashAvailableUS(); // SEPARATE USD pool — never blended with `cash` above
   const recentTrades = await getRecentTrades(); // ticker -> {date, side}, for the cooldown note below
   const configRaw = await getConfig();
   const strategy = cloneStrategy(DEFAULT_STRATEGY, {
@@ -338,7 +361,23 @@ async function main() {
   const avgCostByTicker = new Map(holdings.map(h => [h.ticker.toUpperCase(), Number(h.avgCost)]));
   const qtyByTicker = new Map(holdings.map(h => [h.ticker.toUpperCase(), Number(h.qty)]));
   for (const h of holdings) {
-    if (!universe.find(u => u.code.toUpperCase() === h.ticker.toUpperCase())) universe.push({ code: h.ticker, name: h.ticker, sector: "Unclassified" });
+    if (!universe.find(u => u.code.toUpperCase() === h.ticker.toUpperCase())) {
+      const market = usTickerSet.has(h.ticker.toUpperCase()) ? "US" : undefined;
+      universe.push({ code: h.ticker, name: h.ticker, sector: "Unclassified", ...(market ? { market } : {}) });
+    }
+  }
+
+  // Invested capital, split by pool — mixing RM and USD cost bases into one
+  // number would be meaningless without an FX rate, which this project
+  // deliberately doesn't have. Used for position sizing below; portfolio
+  // heat (RM-only for now) is handled separately further down.
+  const investedCapitalRM = holdings.filter(h => !usTickerSet.has(h.ticker.toUpperCase()))
+    .reduce((s, h) => s + (Number(h.qty) || 0) * (Number(h.avgCost) || 0), 0);
+  const investedCapitalUS = holdings.filter(h => usTickerSet.has(h.ticker.toUpperCase()))
+    .reduce((s, h) => s + (Number(h.qty) || 0) * (Number(h.avgCost) || 0), 0);
+  function cashFor(stock) { return stock.market === "US" ? cashUS : cash; }
+  function portfolioValueFor(stock) {
+    return stock.market === "US" ? (cashUS != null ? cashUS + investedCapitalUS : null) : (cash != null ? cash + investedCapitalRM : null);
   }
 
   const prevState = await loadState();
@@ -376,16 +415,22 @@ async function main() {
       const avgCost = avgCostByTicker.get(stock.code.toUpperCase());
       const qty = qtyByTicker.get(stock.code.toUpperCase()) || 0;
       const info = avgCost != null ? computeStopInfo(hist, avgCost) : null;
-      heatHoldings.push({
-        ticker: stock.code, qty, avgCost, currentPrice: price,
-        stopPrice: info ? info.operative : null, sector: sectorFor(universe, stock.code)
-      });
+      // Portfolio heat is an RM-only metric today (no FX rate to blend a USD
+      // holding's risk into one number) — a held US position is excluded
+      // here rather than silently counted as zero risk. See README.
+      if (stock.market !== "US") {
+        heatHoldings.push({
+          ticker: stock.code, qty, avgCost, currentPrice: price,
+          stopPrice: info ? info.operative : null, sector: sectorFor(universe, stock.code)
+        });
+      }
     }
 
     if (!isHeld && !liquid) continue;
 
-    const fitsBudget = cash == null ? null : price * lotSizeFor(stock) <= cash;
-    if (!isHeld && cash != null && fitsBudget === false) continue;
+    const stockCash = cashFor(stock);
+    const fitsBudget = stockCash == null ? null : price * lotSizeFor(stock) <= stockCash;
+    if (!isHeld && stockCash != null && fitsBudget === false) continue;
 
     nextSignals[stock.code] = cls.signal;
 
@@ -402,10 +447,9 @@ async function main() {
         breakout: latestBreakoutSignal(hist) // independent 20d-high+volume check, not scored — see lib/decision.js
       });
       const ets = computeEntryStopTarget({ currentPrice: price, highs: hist.map(h => h.high), lows: hist.map(h => h.low), closes });
-      if (cash != null && ets) {
-        const investedCapital = holdings.reduce((s, h) => s + (Number(h.qty) || 0) * (avgCostByTicker.get(h.ticker.toUpperCase()) || 0), 0);
-        const portfolioValue = cash + investedCapital;
-        sizing = computePositionSize({ portfolioValue, maxRiskPct, entry: price, stop: ets.stop, cash, target: ets.target, lotSize: lotSizeFor(stock) });
+      const portfolioValue = portfolioValueFor(stock);
+      if (stockCash != null && portfolioValue != null && ets) {
+        sizing = computePositionSize({ portfolioValue, maxRiskPct, entry: price, stop: ets.stop, cash: stockCash, target: ets.target, lotSize: lotSizeFor(stock) });
       }
       if (ets) card = buildDecisionCard({ ticker: stock.code, name: stock.name, currentPrice: price, base, entryStopTarget: ets, positionSizing: sizing, strategy });
     }
@@ -427,7 +471,7 @@ async function main() {
       if (prevSignal !== cls.signal) {
         changes.push(
           `*${stock.code}* (${stock.name}) — held\n` +
-          `${prevSignal ? prevSignal + " → " : ""}*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · RM${price.toFixed(3)}`
+          `${prevSignal ? prevSignal + " → " : ""}*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · ${curSym(stock)}${price.toFixed(3)}`
         );
       }
     } else {
@@ -449,11 +493,12 @@ async function main() {
 
         const topPositives = card.positives.slice(0, 3).map(p => `✓ ${p}`).join("\n");
         const topRisks = card.risks.slice(0, 2).map(r => `⚠ ${r}`).join("\n");
+        const sym = curSym(stock);
         const decisionLines =
           `\nScore: ${card.score.toFixed(0)}/${card.maxScore.toFixed(0)}` +
-          `\nEntry: RM${card.entry[0].toFixed(3)}–${card.entry[1].toFixed(3)}` +
-          `\nStop: RM${card.stop.toFixed(3)}` +
-          `\nTarget: RM${card.target.toFixed(3)}` +
+          `\nEntry: ${sym}${card.entry[0].toFixed(3)}–${card.entry[1].toFixed(3)}` +
+          `\nStop: ${sym}${card.stop.toFixed(3)}` +
+          `\nTarget: ${sym}${card.target.toFixed(3)}` +
           `\nR:R: ${card.rr.toFixed(1)}` +
           (sizing && sizing.valid && sizing.portfolioRiskPct != null ? `\nPortfolio risk: ${sizing.portfolioRiskPct.toFixed(1)}%` : "") +
           (topPositives ? `\n${topPositives}` : "") +
@@ -463,7 +508,7 @@ async function main() {
 
         changes.push(
           `*${stock.code}* (${stock.name}) — *TRADING PLAN*\n` +
-          `*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · RM${price.toFixed(3)}${fitLine}${cooldownLine}${decisionLines}`
+          `*${cls.signal}* · trend ${cls.trend} · RSI ${cls.rsi.toFixed(1)} · ${sym}${price.toFixed(3)}${fitLine}${cooldownLine}${decisionLines}`
         );
       } else if (!qualifies && prevQualified) {
         changes.push(`*${stock.code}* (${stock.name}) dropped below your ${(MIN_BUY_SCORE_PCT * 10).toFixed(0)}/10 bar — no longer an active candidate.`);
@@ -478,11 +523,12 @@ async function main() {
         nextStops[stock.code] = info.state;
         const prevStopState = prevState.stops[stock.code];
         if (prevStopState !== info.state) {
+          const sym = curSym(stock);
           const labels = {
-            breached: `🔴 stop level breached — RM${info.operative.toFixed(3)}. This is where a disciplined exit would trigger.`,
-            near: `🟡 within 3% of your stop level (RM${info.operative.toFixed(3)}). Watch closely.`,
-            trailing: `🟢 up enough to switch to a trailing stop — new stop RM${info.operative.toFixed(3)} (was hard stop RM${info.hardStop.toFixed(3)}).`,
-            initial: `ℹ️ hard stop-loss suggested at RM${info.hardStop.toFixed(3)} (2×ATR below your average cost).`
+            breached: `🔴 stop level breached — ${sym}${info.operative.toFixed(3)}. This is where a disciplined exit would trigger.`,
+            near: `🟡 within 3% of your stop level (${sym}${info.operative.toFixed(3)}). Watch closely.`,
+            trailing: `🟢 up enough to switch to a trailing stop — new stop ${sym}${info.operative.toFixed(3)} (was hard stop ${sym}${info.hardStop.toFixed(3)}).`,
+            initial: `ℹ️ hard stop-loss suggested at ${sym}${info.hardStop.toFixed(3)} (2×ATR below your average cost).`
           };
           stopAlerts.push(`*${stock.code}* (${stock.name})\n${labels[info.state]}`);
         }

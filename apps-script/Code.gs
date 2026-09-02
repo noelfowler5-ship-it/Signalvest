@@ -132,6 +132,14 @@ function setupSheet() {
     budget.getRange("B1").setValue(0);
     budget.getRange("A2").setValue("Shared secret (paste a long random string, matches SHARED_SECRET script property)");
   }
+  // USD pool: a SEPARATE cash figure for a US-market universe, never blended
+  // into the RM figure above — there is no FX conversion anywhere in this
+  // project. Added idempotently below A1/B1 so re-running setupSheet on an
+  // existing sheet picks it up without touching anything already there.
+  if (!budget.getRange("A3").getValue()) {
+    budget.getRange("A3").setValue("Cash available to invest (USD) — separate pool, never blended with the RM figure above");
+    budget.getRange("B3").setValue(0);
+  }
 
   // Net Worth: monthly rollup with hand-entered cells; never clear an existing one.
   let nw = ss.getSheetByName(SHEET_NAMES.NET_WORTH);
@@ -286,6 +294,25 @@ function doGet(e) {
     budget.getRange("B1").setValue(cash);
     logAudit_(ss, "Budget changed", "Cash available to invest", old, cash, e.parameter.source);
     return json_({ ok: true, cashAvailable: cash });
+  }
+
+  // USD pool — mirrors `budget`/`setBudget` exactly, but reads/writes B3
+  // instead of B1. A SEPARATE figure, never combined with the RM one: there
+  // is no FX conversion anywhere in this project, so blending them into one
+  // number would silently misstate both budget-fit checks.
+  if (action === "budgetUS") {
+    const budget = ss.getSheetByName(SHEET_NAMES.BUDGET);
+    return json_({ cashAvailableUS: Number(budget.getRange("B3").getValue()) || 0 });
+  }
+
+  if (action === "setBudgetUS") {
+    const cash = Number(e.parameter.cash);
+    if (isNaN(cash)) return json_({ error: "invalid cash value" });
+    const budget = ss.getSheetByName(SHEET_NAMES.BUDGET);
+    const old = budget.getRange("B3").getValue();
+    budget.getRange("B3").setValue(cash);
+    logAudit_(ss, "Budget changed", "Cash available to invest (USD)", old, cash, e.parameter.source);
+    return json_({ ok: true, cashAvailableUS: cash });
   }
 
   // Records a human decision (Approve/Reject/Watch) on a screened candidate —
@@ -463,6 +490,10 @@ function doGet(e) {
     const holdRows = hold ? hold.getDataRange().getValues().slice(1).filter(r => r[0] && r[1] > 0) : [];
     const budget = ss.getSheetByName(SHEET_NAMES.BUDGET);
     const cashAvailable = budget ? Number(budget.getRange("B1").getValue()) || 0 : 0;
+    // Separate USD pool — see budgetUS/setBudgetUS above. Never summed with
+    // cashAvailable; the bot's system prompt is responsible for keeping the
+    // two pools distinct when it talks about budget fit.
+    const cashAvailableUS = budget ? Number(budget.getRange("B3").getValue()) || 0 : 0;
     const configSh = ss.getSheetByName(SHEET_NAMES.CONFIG);
     const config = {};
     if (configSh) {
@@ -473,6 +504,7 @@ function doGet(e) {
       riskStatus: readRiskStatus_(ss),
       holdings: holdRows.map(r => ({ ticker: r[0], qty: r[1], avgCost: r[2] })),
       cashAvailable,
+      cashAvailableUS,
       config
     });
   }
