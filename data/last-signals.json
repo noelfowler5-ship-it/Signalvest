@@ -2,7 +2,7 @@
   "signals": {
     "1295.KL": "AVOID",
     "1023.KL": "BUY",
-    "1066.KL": "BUY",
+    "1066.KL": "HOLD",
     "1015.KL": "BUY",
     "2488.KL": "BUY",
     "5185.KL": "HOLD",
@@ -27,7 +27,7 @@
     "1961.KL": "BUY",
     "2291.KL": "BUY",
     "4197.KL": "HOLD",
-    "3182.KL": "AVOID",
+    "3182.KL": "HOLD",
     "4715.KL": "HOLD",
     "7084.KL": "AVOID",
     "5296.KL": "HOLD",
