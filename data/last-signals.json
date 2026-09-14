@@ -74,7 +74,7 @@
     "TSLA": "BUY",
     "AVGO": "AVOID",
     "ORCL": "BUY",
-    "CRM": "BUY",
+    "CRM": "HOLD",
     "ADBE": "BUY",
     "INTC": "AVOID",
     "CSCO": "AVOID",
@@ -83,7 +83,7 @@
     "IBM": "AVOID",
     "JPM": "BUY",
     "BAC": "BUY",
-    "WFC": "BUY",
+    "WFC": "AVOID",
     "V": "BUY",
     "MA": "BUY",
     "JNJ": "BUY",
@@ -107,7 +107,7 @@
     "CAT": "AVOID",
     "BA": "AVOID",
     "GE": "AVOID",
-    "LMT": "BUY"
+    "LMT": "AVOID"
   },
   "stops": {},
   "qualified": {
