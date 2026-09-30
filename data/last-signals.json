@@ -85,7 +85,7 @@
     "BAC": "HOLD",
     "WFC": "AVOID",
     "V": "BUY",
-    "MA": "BUY",
+    "MA": "AVOID",
     "JNJ": "BUY",
     "UNH": "AVOID",
     "PFE": "BUY",
