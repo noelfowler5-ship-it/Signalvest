@@ -1,12 +1,12 @@
 {
   "signals": {
     "1155.KL": "AVOID",
-    "1295.KL": "AVOID",
+    "1295.KL": "HOLD",
     "1023.KL": "AVOID",
     "1066.KL": "HOLD",
     "5819.KL": "BUY",
     "1082.KL": "BUY",
-    "1015.KL": "AVOID",
+    "1015.KL": "HOLD",
     "2488.KL": "HOLD",
     "5185.KL": "AVOID",
     "5258.KL": "AVOID",
@@ -32,7 +32,7 @@
     "5285.KL": "AVOID",
     "1961.KL": "BUY",
     "2445.KL": "HOLD",
-    "2291.KL": "HOLD",
+    "2291.KL": "BUY",
     "4197.KL": "BUY",
     "3182.KL": "AVOID",
     "4715.KL": "AVOID",
